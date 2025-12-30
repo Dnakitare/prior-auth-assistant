@@ -8,6 +8,7 @@ import structlog
 from src.core.models import AppealLetter, DenialExtraction, PatientContext
 from src.integrations.llm import LLMClient
 from src.integrations.ocr import OCRProvider
+from src.templates.appeal_templates import get_required_documents
 
 logger = structlog.get_logger()
 
@@ -102,55 +103,7 @@ class AppealGenerationService:
 
     def _get_required_documents(self, denial: DenialExtraction) -> list[str]:
         """Determine required supporting documents based on denial reason."""
-        base_docs = [
-            "Copy of denial letter",
-            "Patient insurance card (front and back)",
-        ]
-
-        reason_specific: dict[str, list[str]] = {
-            "medical_necessity": [
-                "Physician letter of medical necessity",
-                "Relevant clinical notes and history",
-                "Lab results and diagnostic imaging",
-                "Peer-reviewed literature supporting treatment",
-            ],
-            "not_covered": [
-                "Evidence of coverage under plan",
-                "Summary of Benefits and Coverage (SBC)",
-                "Prior authorization approval (if applicable)",
-            ],
-            "missing_information": [
-                "All previously submitted documentation",
-                "Additional requested documentation",
-                "Updated patient information form",
-            ],
-            "step_therapy_required": [
-                "Documentation of prior treatments tried",
-                "Clinical notes showing treatment failures",
-                "Adverse reaction documentation (if applicable)",
-            ],
-            "experimental_treatment": [
-                "FDA approval documentation",
-                "Clinical trial results",
-                "Peer-reviewed studies supporting efficacy",
-                "Letters from specialists",
-            ],
-            "out_of_network": [
-                "Documentation of in-network unavailability",
-                "Specialist referral",
-                "Urgency documentation",
-            ],
-            "quantity_limit": [
-                "Physician justification for quantity",
-                "Treatment protocol documentation",
-                "Prior authorization for increased quantity",
-            ],
-        }
-
-        denial_reason = denial.denial_reason.value
-        specific_docs = reason_specific.get(denial_reason, [])
-
-        return base_docs + specific_docs
+        return get_required_documents(denial.denial_reason.value)
 
     def _calculate_confidence(self, denial: DenialExtraction) -> float:
         """
