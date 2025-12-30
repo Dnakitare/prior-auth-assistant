@@ -1,18 +1,14 @@
 """Appeal generation endpoints."""
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from src.core.models import AppealLetter, DenialExtraction, PatientContext
+from src.core.services import AppealGenerationService
+from src.integrations.llm import get_llm_client
+from src.integrations.ocr import get_ocr_provider
+
 router = APIRouter()
-
-
-class AppealRequest(BaseModel):
-    """Request model for appeal generation."""
-
-    patient_name: str
-    procedure_code: str
-    diagnosis_codes: list[str]
-    additional_context: str | None = None
 
 
 class AppealResponse(BaseModel):
@@ -20,50 +16,147 @@ class AppealResponse(BaseModel):
 
     appeal_id: str
     appeal_letter: str
-    denial_reason: str | None
+    denial_info: DenialExtraction
     required_documents: list[str]
     confidence_score: float
 
 
-@router.post("/appeals/generate")
-async def generate_appeal(
-    denial_letter: UploadFile = File(...),
-) -> dict[str, str]:
-    """
-    Generate an appeal letter from a denial letter.
+class TextAppealRequest(BaseModel):
+    """Request for appeal generation from text input."""
 
-    Accepts a PDF/image of the denial letter, extracts the denial reason,
-    and generates a medical necessity appeal letter.
-    """
-    # TODO: Implement OCR extraction
-    # TODO: Implement appeal generation
-    return {
-        "status": "processing",
-        "message": f"Received denial letter: {denial_letter.filename}",
-    }
+    denial_text: str
+    patient_name: str | None = None
+    procedure_code: str | None = None
+    procedure_description: str | None = None
+    diagnosis_codes: list[str] | None = None
+    clinical_notes: str | None = None
+    prior_treatments: list[str] | None = None
+    treating_physician: str | None = None
 
 
-@router.post("/appeals/generate-with-context")
-async def generate_appeal_with_context(
-    request: AppealRequest,
-    denial_letter: UploadFile = File(...),
-) -> dict[str, str]:
-    """
-    Generate an appeal with additional patient context.
+def get_appeal_service() -> AppealGenerationService:
+    """Create appeal service with dependencies."""
+    return AppealGenerationService(
+        ocr_provider=get_ocr_provider(),
+        llm_client=get_llm_client(),
+    )
 
-    Combines the denial letter with structured patient information
-    for more targeted appeal generation.
+
+@router.post("/appeals/upload", response_model=AppealResponse)
+async def generate_appeal_from_document(
+    denial_letter: UploadFile = File(..., description="PDF or image of denial letter"),
+    patient_name: str | None = Form(None),
+    procedure_code: str | None = Form(None),
+    procedure_description: str | None = Form(None),
+    diagnosis_codes: str | None = Form(None, description="Comma-separated ICD-10 codes"),
+    clinical_notes: str | None = Form(None),
+    prior_treatments: str | None = Form(None, description="Comma-separated list"),
+    treating_physician: str | None = Form(None),
+) -> AppealResponse:
     """
-    # TODO: Implement full appeal generation pipeline
-    return {
-        "status": "processing",
-        "patient": request.patient_name,
-        "procedure": request.procedure_code,
-    }
+    Generate an appeal letter from an uploaded denial document.
+
+    Accepts PDF or image files. OCR extracts the text, then the pipeline
+    analyzes the denial and generates an appeal letter.
+    """
+    # Validate file type
+    if denial_letter.content_type not in [
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "image/tiff",
+    ]:
+        raise HTTPException(
+            status_code=400,
+            detail="File must be PDF, PNG, JPEG, or TIFF",
+        )
+
+    # Read file content
+    content = await denial_letter.read()
+    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
+    # Build patient context if provided
+    patient_context = None
+    if patient_name or procedure_code:
+        patient_context = PatientContext(
+            patient_name=patient_name or "Unknown",
+            procedure_code=procedure_code or "Unknown",
+            procedure_description=procedure_description,
+            diagnosis_codes=diagnosis_codes.split(",") if diagnosis_codes else [],
+            clinical_notes=clinical_notes,
+            prior_treatments=prior_treatments.split(",") if prior_treatments else [],
+            treating_physician=treating_physician,
+        )
+
+    # Process through pipeline
+    service = get_appeal_service()
+    try:
+        appeal = await service.process_denial(content, patient_context)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process denial: {str(e)}")
+
+    return AppealResponse(
+        appeal_id=appeal.id,
+        appeal_letter=appeal.letter_content,
+        denial_info=appeal.denial_extraction,
+        required_documents=appeal.required_attachments,
+        confidence_score=appeal.confidence_score,
+    )
+
+
+@router.post("/appeals/text", response_model=AppealResponse)
+async def generate_appeal_from_text(request: TextAppealRequest) -> AppealResponse:
+    """
+    Generate an appeal letter from denial text.
+
+    Use this endpoint when you already have the denial letter text
+    (e.g., from copy-paste or a different OCR system).
+    """
+    if not request.denial_text or len(request.denial_text) < 50:
+        raise HTTPException(
+            status_code=400,
+            detail="Denial text must be at least 50 characters",
+        )
+
+    # Build patient context if provided
+    patient_context = None
+    if request.patient_name or request.procedure_code:
+        patient_context = PatientContext(
+            patient_name=request.patient_name or "Unknown",
+            procedure_code=request.procedure_code or "Unknown",
+            procedure_description=request.procedure_description,
+            diagnosis_codes=request.diagnosis_codes or [],
+            clinical_notes=request.clinical_notes,
+            prior_treatments=request.prior_treatments or [],
+            treating_physician=request.treating_physician,
+        )
+
+    # Process through pipeline (skip OCR)
+    service = get_appeal_service()
+    try:
+        appeal = await service.process_denial_from_text(
+            request.denial_text,
+            patient_context,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process denial: {str(e)}")
+
+    return AppealResponse(
+        appeal_id=appeal.id,
+        appeal_letter=appeal.letter_content,
+        denial_info=appeal.denial_extraction,
+        required_documents=appeal.required_attachments,
+        confidence_score=appeal.confidence_score,
+    )
 
 
 @router.get("/appeals/{appeal_id}")
 async def get_appeal(appeal_id: str) -> dict[str, str]:
-    """Retrieve a previously generated appeal."""
+    """
+    Retrieve a previously generated appeal.
+
+    Note: Currently returns not_found as persistence is not yet implemented.
+    """
     # TODO: Implement appeal retrieval from database
     return {"appeal_id": appeal_id, "status": "not_found"}
