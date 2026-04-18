@@ -1,29 +1,72 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { FileUpload } from './components/FileUpload';
 import { PatientContextForm, PatientContext } from './components/PatientContextForm';
 import { AppealPreview } from './components/AppealPreview';
 import { TextInputMode } from './components/TextInputMode';
-import { generateAppealFromDocument, generateAppealFromText } from './api';
+import {
+  generateAppealFromDocument,
+  generateAppealFromText,
+  ApiError,
+  AuthenticationError,
+  RateLimitError,
+  ValidationError,
+} from './api';
 import { AppealResponse } from './types';
 
 type InputMode = 'upload' | 'text';
+
+interface ErrorState {
+  message: string;
+  type: 'error' | 'warning' | 'auth' | 'rate_limit';
+  retryAfter?: number;
+}
 
 function App() {
   const [inputMode, setInputMode] = useState<InputMode>('upload');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [patientContext, setPatientContext] = useState<PatientContext | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorState | null>(null);
   const [appeal, setAppeal] = useState<AppealResponse | null>(null);
 
-  const handleFileSelect = (file: File) => {
+  const handleError = useCallback((err: unknown): void => {
+    if (err instanceof AuthenticationError) {
+      setError({
+        message: 'Authentication required. Please provide an API key.',
+        type: 'auth',
+      });
+    } else if (err instanceof RateLimitError) {
+      setError({
+        message: err.message,
+        type: 'rate_limit',
+        retryAfter: err.retryAfter,
+      });
+    } else if (err instanceof ValidationError) {
+      setError({
+        message: err.message,
+        type: 'warning',
+      });
+    } else if (err instanceof ApiError) {
+      setError({
+        message: err.message,
+        type: 'error',
+      });
+    } else {
+      setError({
+        message: err instanceof Error ? err.message : 'An unexpected error occurred',
+        type: 'error',
+      });
+    }
+  }, []);
+
+  const handleFileSelect = useCallback((file: File) => {
     setSelectedFile(file);
     setError(null);
-  };
+  }, []);
 
-  const handleContextChange = (context: PatientContext) => {
+  const handleContextChange = useCallback((context: PatientContext) => {
     setPatientContext(context);
-  };
+  }, []);
 
   const handleGenerateFromFile = async () => {
     if (!selectedFile) return;
@@ -35,7 +78,7 @@ function App() {
       const result = await generateAppealFromDocument(selectedFile, patientContext || undefined);
       setAppeal(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate appeal');
+      handleError(err);
     } finally {
       setIsLoading(false);
     }
@@ -65,18 +108,18 @@ function App() {
       const result = await generateAppealFromText(request);
       setAppeal(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate appeal');
+      handleError(err);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     setSelectedFile(null);
     setPatientContext(null);
     setAppeal(null);
     setError(null);
-  };
+  }, []);
 
   // Show appeal preview if we have a result
   if (appeal) {
@@ -132,16 +175,55 @@ function App() {
 
         {/* Error Display */}
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-            <div className="flex items-center gap-2">
-              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                <path
-                  fillRule="evenodd"
-                  d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-                  clipRule="evenodd"
-                />
-              </svg>
-              <span>{error}</span>
+          <div
+            role="alert"
+            aria-live="assertive"
+            className={`mb-6 p-4 rounded-lg border ${
+              error.type === 'auth'
+                ? 'bg-purple-50 border-purple-200 text-purple-700'
+                : error.type === 'rate_limit'
+                ? 'bg-orange-50 border-orange-200 text-orange-700'
+                : error.type === 'warning'
+                ? 'bg-yellow-50 border-yellow-200 text-yellow-700'
+                : 'bg-red-50 border-red-200 text-red-700'
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              {error.type === 'auth' ? (
+                <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+                </svg>
+              ) : error.type === 'rate_limit' ? (
+                <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
+                </svg>
+              ) : error.type === 'warning' ? (
+                <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                  <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+              )}
+              <div className="flex-1">
+                <p className="font-medium">{error.message}</p>
+                {error.type === 'rate_limit' && error.retryAfter && (
+                  <p className="text-sm mt-1">Please try again in {error.retryAfter} seconds.</p>
+                )}
+                {error.type === 'auth' && (
+                  <p className="text-sm mt-1">Contact your administrator to obtain API credentials.</p>
+                )}
+              </div>
+              <button
+                onClick={() => setError(null)}
+                className="flex-shrink-0 ml-2 hover:opacity-70 transition-opacity"
+                aria-label="Dismiss error"
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
             </div>
           </div>
         )}

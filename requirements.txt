@@ -1,27 +1,45 @@
-# Core
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
-python-multipart>=0.0.6
+# Pinned with tight upper bounds to prevent surprise breakage. Regenerate
+# with `pip-compile --upgrade` and test before widening bounds.
 
-# AI/ML
-anthropic>=0.18.0
+# Core
+fastapi>=0.109.0,<0.120.0
+uvicorn[standard]>=0.27.0,<0.35.0
+python-multipart>=0.0.6,<0.1.0
+starlette>=0.36.0,<0.48.0
+
+# AI/ML (>=0.40 enables system cache_control for prompt caching)
+anthropic>=0.40.0,<1.0.0
 
 # AWS (for Textract OCR)
-boto3>=1.34.0
+boto3>=1.34.0,<2.0.0
 
 # Database
-sqlalchemy>=2.0.0
-asyncpg>=0.29.0
-redis>=5.0.0
+sqlalchemy>=2.0.0,<2.1.0
+asyncpg>=0.29.0,<0.31.0
+aiosqlite>=0.20.0,<0.22.0
+redis>=5.0.0,<6.0.0
+alembic>=1.13.0,<2.0.0
+
+# Security
+PyJWT>=2.8.0,<3.0.0
+cryptography>=42.0.0,<46.0.0
 
 # Configuration
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-python-dotenv>=1.0.0
+pydantic>=2.5.0,<3.0.0
+pydantic-settings>=2.1.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
 
 # HTTP Client
-httpx>=0.26.0
+httpx>=0.26.0,<1.0.0
 
-# Utilities
-tenacity>=8.2.0
-structlog>=24.1.0
+# Observability
+prometheus-client>=0.20.0,<1.0.0
+structlog>=24.1.0,<26.0.0
+
+# Retry
+tenacity>=8.2.0,<10.0.0
+
+# Testing
+pytest>=8.0.0,<9.0.0
+pytest-asyncio>=0.23.0,<2.0.0
+pytest-cov>=4.1.0,<7.0.0

@@ -1,0 +1,75 @@
+# Production compose file.
+# - No source mount. No --reload. No exposed DB/Redis ports.
+# - Secrets come from the environment or an orchestrator secret store; the
+#   .env example is NOT suitable for production. Use --env-file carefully.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      REQUIRE_HTTPS: "true"
+      RATE_LIMIT_BACKEND: redis
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY}
+      PHI_ENCRYPTION_KEYS: ${PHI_ENCRYPTION_KEYS}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES}
+      BOOTSTRAP_API_KEYS: ${BOOTSTRAP_API_KEYS:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Terminate TLS and enforce HTTPS at a reverse proxy in front of this service.
+    # The API only listens on the internal network.
+    expose:
+      - "8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,1 +1,1 @@
-"""Test suite for Prior Authorization Assistant."""
+# Test package

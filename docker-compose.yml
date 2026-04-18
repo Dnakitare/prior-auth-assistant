@@ -1,7 +1,7 @@
-version: '3.8'
+# Development compose file. For production use docker-compose.prod.yml.
+# This file mounts the source tree and enables --reload; do not deploy as-is.
 
 services:
-  # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
     container_name: prior-auth-db
@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: prior_auth_dev
       POSTGRES_DB: prior_auth
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # loopback only
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,12 +19,11 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redis for caching/queuing
   redis:
     image: redis:7-alpine
     container_name: prior-auth-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"   # loopback only
     volumes:
       - redis_data:/data
     healthcheck:
@@ -33,23 +32,25 @@ services:
       timeout: 5s
       retries: 5
 
-  # Backend API
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: prior-auth-api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://prior_auth:prior_auth_dev@postgres:5432/prior_auth
       - REDIS_URL=redis://redis:6379/0
+      - RATE_LIMIT_BACKEND=memory
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - APP_ENV=development
       - DEBUG=true
+      # Dev-only: generate once and paste, or let settings mint ephemerals.
+      - PHI_ENCRYPTION_KEYS=${PHI_ENCRYPTION_KEYS:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,16 +58,16 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src:ro
+      - ./alembic:/app/alembic:ro
     command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 
-  # Frontend (development)
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
     container_name: prior-auth-frontend
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - VITE_API_URL=http://api:8000
     volumes:

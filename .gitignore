@@ -32,6 +32,12 @@ build/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+tests/test.db
+tests/*.sqlite*
+
+# Frontend
+node_modules/
+frontend/dist/
 
 # OS
 .DS_Store
