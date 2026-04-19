@@ -27,7 +27,9 @@ from tenacity import (
 )
 
 from src.core.config import settings
+from src.core.metrics import llm_call_duration_seconds, llm_calls_total
 from src.core.models import DenialExtraction, DenialReason, PatientContext
+from src.core.tracing import trace_llm_call
 from src.templates.appeal_templates import TEMPLATES, get_template
 
 logger = structlog.get_logger()
@@ -139,6 +141,8 @@ class LLMClient:
         self._check_input_size(denial_text)
         log = logger.bind(text_length=len(denial_text))
         log.info("Sending extraction request to LLM")
+        import time as _time
+        _start = _time.perf_counter()
 
         # Per-request random delimiter makes it structurally impossible for
         # an embedded attacker to close our wrapping tag.
@@ -152,11 +156,24 @@ class LLMClient:
             f"{delim_open}\n{denial_text}\n{delim_close}"
         )
 
-        response_text = await self._call_api(
-            system_prompt=EXTRACTION_SYSTEM_PROMPT,
-            user_content=user_content,
-            max_tokens=settings.llm_max_tokens_extraction,
-        )
+        with trace_llm_call("extract"):
+            try:
+                response_text = await self._call_api(
+                    system_prompt=EXTRACTION_SYSTEM_PROMPT,
+                    user_content=user_content,
+                    max_tokens=settings.llm_max_tokens_extraction,
+                )
+                llm_calls_total.labels(operation="extract", outcome="ok").inc()
+            except anthropic.RateLimitError:
+                llm_calls_total.labels(operation="extract", outcome="rate_limit").inc()
+                raise
+            except Exception:
+                llm_calls_total.labels(operation="extract", outcome="error").inc()
+                raise
+            finally:
+                llm_call_duration_seconds.labels(operation="extract").observe(
+                    _time.perf_counter() - _start
+                )
 
         data = self._parse_json(response_text, log)
         extraction = self._assemble_extraction(data, denial_text)
@@ -214,11 +231,26 @@ class LLMClient:
             f"{denial_open}\n{denial_context}\n{denial_close}"
         )
 
-        response = await self._call_api(
-            system_prompt=APPEAL_SYSTEM_PROMPT,
-            user_content=user_content,
-            max_tokens=settings.llm_max_tokens_generation,
-        )
+        import time as _time
+        _gen_start = _time.perf_counter()
+        with trace_llm_call("generate"):
+            try:
+                response = await self._call_api(
+                    system_prompt=APPEAL_SYSTEM_PROMPT,
+                    user_content=user_content,
+                    max_tokens=settings.llm_max_tokens_generation,
+                )
+                llm_calls_total.labels(operation="generate", outcome="ok").inc()
+            except anthropic.RateLimitError:
+                llm_calls_total.labels(operation="generate", outcome="rate_limit").inc()
+                raise
+            except Exception:
+                llm_calls_total.labels(operation="generate", outcome="error").inc()
+                raise
+            finally:
+                llm_call_duration_seconds.labels(operation="generate").observe(
+                    _time.perf_counter() - _gen_start
+                )
 
         self._validate_appeal_preserves_identifiers(
             response, denial=denial, patient_context=patient_context, log=log

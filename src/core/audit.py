@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.audit_sink import get_audit_sink
 from src.core.config import settings
 from src.core.db_models import AuditLogRecord
 from src.core.metrics import audit_write_failures_total
@@ -175,6 +176,11 @@ class AuditLogger:
                 audit_logger.info("audit_event", **event_core)
             else:
                 audit_logger.warning("audit_event", **event_core)
+            # Ship to external sink (CloudWatch or no-op). Enqueue only —
+            # delivery happens asynchronously and cannot block this path.
+            await get_audit_sink().ship(
+                {**event_core, "sequence": next_sequence, "row_hmac": row_hmac}
+            )
             return record
 
         raise RuntimeError(

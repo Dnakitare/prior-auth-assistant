@@ -190,6 +190,78 @@ class UserSessionRecord(Base):
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class OrgQuotaRecord(Base):
+    """Per-org token budget, reset daily."""
+
+    __tablename__ = "org_quotas"
+
+    org_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    daily_token_budget: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tokens_used_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tokens_used_month: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    day_window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    month_window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class WebhookEndpointRecord(Base):
+    """Registered webhook destinations per org."""
+
+    __tablename__ = "webhook_endpoints"
+    __table_args__ = (
+        Index("ix_webhook_endpoints_org", "org_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    org_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    # Secret used to sign deliveries; stored plaintext (non-PHI, but sensitive —
+    # treat like an API key: rotate if leaked).
+    signing_secret: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Event types to subscribe to: ["appeal.status_changed", ...]
+    events: Mapped[list[str]] = mapped_column(JSON, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    last_delivery_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_delivery_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class WebhookDeliveryRecord(Base):
+    """Per-attempt delivery record. Kept for retry/backoff bookkeeping."""
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (
+        Index("ix_webhook_deliveries_endpoint", "endpoint_id"),
+        Index("ix_webhook_deliveries_next", "next_attempt_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    endpoint_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    org_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
 class AuditLogRecord(Base):
     """Append-only tamper-evident audit log.
 

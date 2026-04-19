@@ -124,6 +124,15 @@ See `.env.example` for the full list including tunables.
 | `POST /api/v1/admin/api-keys` | Create a key. Plaintext returned **once** in the response |
 | `GET /api/v1/admin/api-keys` | List keys (filtered by org for org-scoped admins) |
 | `DELETE /api/v1/admin/api-keys/{id}` | Revoke a key (idempotent) |
+| `POST /api/v1/admin/webhooks` | Register a webhook endpoint. Signing secret returned **once** |
+| `GET /api/v1/admin/webhooks` | List webhook endpoints |
+| `DELETE /api/v1/admin/webhooks/{id}` | Soft-delete (sets `is_active=false`) |
+
+### Appeal lifecycle
+
+| Endpoint | Description |
+|---|---|
+| `PATCH /api/v1/appeals/{id}/status` | Transition status (`generated` → `submitted` → `approved`/`denied`/`withdrawn`). Emits `appeal.status_changed` webhook |
 
 ### Operational
 
@@ -287,18 +296,31 @@ prior-auth-assistant/
 
 ## Launch readiness
 
-Completed in the hardening rounds:
+Completed in the hardening rounds (1–3):
 
-- Tenant isolation, field-level PHI encryption, HMAC-chained audit, Redis rate limiting, JWT revocation, magic-byte uploads, prompt-injection hardening, body-size cap, HTTPS enforcement, admin key CRUD, `/metrics`, statement timeouts, dependency pinning.
+- **Security / PHI**: tenant isolation, field-level PHI encryption (Fernet MultiFernet), HMAC-chained audit log, magic-byte uploads, prompt-injection hardening.
+- **Auth**: DB-backed API keys, JWT revocation, brute-force lockout, admin key + webhook CRUD.
+- **Edge protections**: Redis distributed rate limiting, body-size cap, HTTPS enforcement, strict CSP.
+- **External witness**: CloudWatch Logs audit sink (retention-locked).
+- **Observability**: Prometheus `/metrics` with RED + LLM + audit signals; OpenTelemetry tracing for FastAPI + SQLAlchemy + httpx + explicit LLM spans; real LLM health ping (opt-in).
+- **DB hygiene**: statement timeout, idle-in-tx timeout, pool recycle.
+- **Cost controls**: per-org daily LLM token budget (`org_quotas`).
+- **Lifecycle**: appeal status transitions + signed outbound webhooks with retry & exponential backoff.
+- **Ops**: separate migration CLI, encrypted backup script + restore drill docs, k6 load test, security/compliance/legal runbooks.
+- **Dependencies**: pinned with tight upper bounds.
 
-Still recommended before serving patient data:
+Still required before serving patient data — work we can't do from code:
 
-- **External audit sink** (CloudWatch Logs WORM / S3 Object Lock / QLDB) so the HMAC chain isn't the only defence against an attacker with app-level RCE.
-- **Backup strategy** with encryption keys stored separately from the PHI encryption keys, and periodic restore drills.
-- **Load test** to validate `database_pool_size` / Redis sizing under realistic traffic.
-- **PHI-aware log shipping**: confirm no PHI ends up in error traces or third-party log aggregators.
-- **Security runbook**: incident response for compromised API keys, chain-verification-failed alerts, Fernet key rotation drills.
-- **Frontend hardening**: idempotency header, move inline `style={{}}` to CSS modules so CSP can drop `'unsafe-inline'`.
+- **Signed BAAs** with Anthropic and AWS (see [docs/COMPLIANCE.md](docs/COMPLIANCE.md)).
+- **Legal review** of the generated-content disclaimer and UI acknowledgment gate (see [docs/LEGAL.md](docs/LEGAL.md)).
+- **Penetration test** + **SOC 2 Type I** audit. Type II follows after a 6–12 month control window.
+- **Quarterly drills**: backup restore, chain verification, Fernet key rotation, breach-notification tabletop.
+
+Nice-to-have post-launch:
+
+- **Per-org LLM cost quotas**: schema is in place, but add admin endpoints to set budgets per org and emit notifications as orgs approach their limits.
+- **Frontend**: move inline `style={{}}` to CSS modules so CSP can drop `'unsafe-inline'`.
+- **Zero-downtime JWT rotation**: accept two keys during cutover.
 
 ---
 

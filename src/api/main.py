@@ -144,8 +144,18 @@ async def lifespan(app: FastAPI):
 
     await _seed_bootstrap_api_keys()
 
+    # Start the external audit sink worker if configured.
+    from src.core.audit_sink import configure_audit_sink, shutdown_audit_sink
+    await configure_audit_sink()
+
+    # Start the webhook delivery worker.
+    from src.core.webhooks import start_webhook_worker, stop_webhook_worker
+    await start_webhook_worker()
+
     yield
 
+    await stop_webhook_worker()
+    await shutdown_audit_sink()
     if redis_client is not None:
         await redis_client.close()
     logger.info("shutdown")
@@ -240,6 +250,11 @@ async def global_exception_handler(request, exc):
         status_code=500,
         content={"detail": str(exc), "type": type(exc).__name__},
     )
+
+
+# Optional OpenTelemetry instrumentation.
+from src.core.tracing import configure_tracing
+configure_tracing(app)
 
 
 app.include_router(health.router, tags=["Health"])

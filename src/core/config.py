@@ -88,6 +88,25 @@ class Settings(BaseSettings):
     # File upload
     max_upload_size_mb: int = Field(default=10, ge=1, le=100)
 
+    # External audit sink. When set, audit events are also shipped to a
+    # CloudWatch Logs group alongside the in-DB HMAC chain. Create the log
+    # group in advance with a retention lock (or a subscription filter that
+    # writes to S3 Object Lock) for tamper-evidence under application RCE.
+    audit_sink_cloudwatch_group: str = Field(default="")
+
+    # Per-org LLM token budget (in tokens). 0 = no enforcement. Applies to
+    # both extraction and generation calls, summed.
+    org_daily_token_budget: int = Field(default=0, ge=0)
+
+    # Webhook delivery
+    webhook_delivery_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    webhook_max_attempts: int = Field(default=5, ge=1, le=20)
+
+    # OpenTelemetry tracing. When set, FastAPI + SQLAlchemy + httpx are
+    # instrumented and spans are exported to the OTLP endpoint.
+    otel_exporter_otlp_endpoint: str = Field(default="")
+    otel_service_name: str = Field(default="prior-auth-assistant")
+
     # Health check: when true, /health calls Anthropic for real (costs tokens
     # per invocation). Usually false; monitoring should use /health/live.
     health_check_llm_live: bool = Field(default=False)

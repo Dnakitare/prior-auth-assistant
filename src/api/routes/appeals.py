@@ -14,10 +14,12 @@ from src.core.audit import AuditAction, audit
 from src.core.config import settings
 from src.core.database import get_session
 from src.core.models import AppealLetter, DenialExtraction, DenialReason, PatientContext
+from src.core.quota import QuotaExceeded, check_and_reserve
 from src.core.repositories import AppealRepository, decode_diagnosis_codes
 from src.core.security import AuthenticatedUser, get_current_user
 from src.core.upload_validation import UnsupportedFileType, detect_type, safe_filename
 from src.core.services import AppealGenerationService
+from src.core.webhooks import emit_appeal_event
 from src.integrations.llm import LLMError, LLMInputTooLarge, get_llm_client
 from src.integrations.ocr import OCRError, get_ocr_provider
 
@@ -110,6 +112,19 @@ def _to_response(
     )
 
 
+async def _reserve_llm_budget(db: AsyncSession, org_id: str) -> None:
+    """Reserve upper-bound tokens for this appeal against the org's daily budget."""
+    estimate = settings.llm_max_tokens_extraction + settings.llm_max_tokens_generation
+    try:
+        await check_and_reserve(db, org_id=org_id, tokens=estimate)
+    except QuotaExceeded as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Organization LLM token budget exceeded ({e.used}/{e.budget}). Retry after daily reset.",
+            headers={"Retry-After": "3600"},
+        )
+
+
 def _require_org(user: AuthenticatedUser) -> str:
     if not user.org_id:
         raise HTTPException(
@@ -187,6 +202,7 @@ async def generate_appeal_from_document(
         treating_physician=treating_physician,
     )
 
+    await _reserve_llm_budget(db, org_id)
     service = get_appeal_service()
     try:
         appeal = await service.process_denial(content, patient_context)
@@ -253,6 +269,7 @@ async def generate_appeal_from_text(
         treating_physician=appeal_request.treating_physician,
     )
 
+    await _reserve_llm_budget(db, org_id)
     service = get_appeal_service()
     try:
         appeal = await service.process_denial_from_text(
@@ -281,6 +298,106 @@ async def generate_appeal_from_text(
     )
 
     return _to_response(appeal)
+
+
+_VALID_STATUSES = {"generated", "submitted", "approved", "denied", "withdrawn"}
+
+
+class AppealStatusUpdate(BaseModel):
+    status: str = Field(..., min_length=1, max_length=32)
+
+
+@router.patch(
+    "/appeals/{appeal_id}/status",
+    response_model=AppealResponse,
+    responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+async def update_appeal_status(
+    request: Request,
+    appeal_id: str,
+    payload: AppealStatusUpdate,
+    user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> AppealResponse:
+    """Transition an appeal's status. Scoped to caller's org. Emits
+    appeal.status_changed webhook."""
+    org_id = _require_org(user)
+    ctx = _audit_context(request)
+    log = logger.bind(user_id=user.user_id, org_id=org_id, appeal_id=appeal_id)
+
+    if payload.status not in _VALID_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"status must be one of: {sorted(_VALID_STATUSES)}",
+        )
+
+    repo = AppealRepository(db)
+    record = await repo.get_by_id(appeal_id, org_id=org_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Appeal not found"
+        )
+    previous = record.status
+    if previous == payload.status:
+        # Idempotent; no webhook for a no-op transition.
+        log.info("appeal_status_unchanged", status=payload.status)
+    else:
+        record.status = payload.status
+        await db.flush()
+        await emit_appeal_event(
+            db,
+            org_id=org_id,
+            event_type="appeal.status_changed",
+            payload={
+                "appeal_id": record.id,
+                "previous_status": previous,
+                "new_status": record.status,
+                "changed_by": user.user_id,
+                "changed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        await audit.safe_log(
+            db=db,
+            action=AuditAction.APPEAL_UPDATE,
+            user_id=user.user_id,
+            org_id=org_id,
+            resource_type="appeal",
+            resource_id=appeal_id,
+            ip_address=ctx.get("ip_address"),
+            request_id=ctx.get("request_id"),
+            contains_phi=False,
+            previous_status=previous,
+            new_status=payload.status,
+        )
+
+    denial_info = DenialExtraction(
+        payer_name=record.payer_name,
+        denial_date=record.denial_date,
+        denial_reason=(
+            record.denial_reason
+            if isinstance(record.denial_reason, DenialReason)
+            else DenialReason(record.denial_reason)
+        ),
+        denial_reason_text=record.denial_reason_text,
+        procedure_codes=record.procedure_codes or [],
+        diagnosis_codes=decode_diagnosis_codes(record),
+        member_id=record.member_id,
+        claim_number=record.claim_number,
+        raw_text=record.denial_text,
+    )
+    return AppealResponse(
+        appeal_id=record.id,
+        appeal_letter=record.appeal_letter,
+        denial_info=denial_info,
+        required_documents=record.required_documents or [],
+        confidence_score=record.confidence_score,
+        created_at=(
+            record.created_at.replace(tzinfo=timezone.utc)
+            if record.created_at and record.created_at.tzinfo is None
+            else (record.created_at or datetime.now(timezone.utc))
+        ),
+        warnings=[],
+    )
 
 
 @router.get(

@@ -120,10 +120,22 @@ api.interceptors.response.use(
   }
 );
 
+// The server dedupes on (org_id, idempotency_key). Callers that want a
+// **retry** (same logical submission) MUST pass the same key explicitly
+// as the second argument; the default generator produces a new key per
+// call, which is correct for user-initiated re-submissions (a different
+// appeal) but wrong for network-level retries of a single attempt.
+function newIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
 export async function generateAppealFromText(
-  request: TextAppealRequest
+  request: TextAppealRequest,
+  idempotencyKey: string = newIdempotencyKey()
 ): Promise<AppealResponse> {
-  const response = await api.post<AppealResponse>('/api/v1/appeals/text', request);
+  const response = await api.post<AppealResponse>('/api/v1/appeals/text', request, {
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
   return response.data;
 }
 
@@ -137,7 +149,8 @@ export async function generateAppealFromDocument(
     clinical_notes?: string;
     prior_treatments?: string;
     treating_physician?: string;
-  }
+  },
+  idempotencyKey: string = newIdempotencyKey()
 ): Promise<AppealResponse> {
   const formData = new FormData();
   formData.append('denial_letter', file);
@@ -153,6 +166,7 @@ export async function generateAppealFromDocument(
   const response = await api.post<AppealResponse>('/api/v1/appeals/upload', formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
+      'Idempotency-Key': idempotencyKey,
     },
   });
   return response.data;
