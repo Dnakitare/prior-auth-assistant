@@ -72,6 +72,31 @@ class TestRlsEnforcement:
             rows = (
                 await db.execute(text("SELECT org_id FROM appeals"))
             ).scalars().all()
-            assert all(o == "test-org-A" for o in rows), (
-                "RLS did not restrict cross-tenant rows"
-            )
+
+            if not all(o == "test-org-A" for o in rows):
+                # Gather diagnostics so future runs debug themselves.
+                org_guc = (await db.execute(
+                    text("SELECT current_setting('app.org_id', true)")
+                )).scalar()
+                admin_guc = (await db.execute(
+                    text("SELECT current_setting('app.is_admin', true)")
+                )).scalar()
+                rls_state = (await db.execute(text(
+                    "SELECT relrowsecurity, relforcerowsecurity "
+                    "FROM pg_class WHERE relname='appeals'"
+                ))).first()
+                policies = (await db.execute(text(
+                    "SELECT policyname, cmd, qual "
+                    "FROM pg_policies WHERE tablename='appeals'"
+                ))).all()
+                current_user = (await db.execute(text("SELECT current_user"))).scalar()
+                is_super = (await db.execute(text(
+                    "SELECT rolsuper FROM pg_roles WHERE rolname=current_user"
+                ))).scalar()
+                raise AssertionError(
+                    "RLS did not restrict cross-tenant rows\n"
+                    f"  org_guc={org_guc!r} admin_guc={admin_guc!r}\n"
+                    f"  rls_enabled={rls_state} rows={rows}\n"
+                    f"  policies={policies}\n"
+                    f"  current_user={current_user} rolsuper={is_super}"
+                )
