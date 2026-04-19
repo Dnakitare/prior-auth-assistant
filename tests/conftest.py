@@ -69,7 +69,16 @@ class _AdminContextSession:
     async def __aenter__(self):
         self._session = await self._inner_cm.__aenter__()
         from src.core.security import set_rls_context
-        await set_rls_context(self._session, org_id=None, is_admin=True, source="test")
+        # Session-scoped so the context survives across mid-test db.commit()
+        # calls. Safe because tests use NullPool — each session owns its
+        # connection and discards it on close, so no cross-principal leak.
+        await set_rls_context(
+            self._session,
+            org_id=None,
+            is_admin=True,
+            source="test",
+            scope="session",
+        )
         return self._session
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -146,7 +155,7 @@ async def _init_schema():
 
     async with async_session_maker() as db:
         # Seed with the admin context active so RLS (if enabled) allows the write.
-        await set_rls_context(db, org_id=None, is_admin=True, source="test")
+        await set_rls_context(db, org_id=None, is_admin=True, source="test", scope="session")
         db.add(
             ApiKeyRecord(
                 id=str(uuid.uuid4()),

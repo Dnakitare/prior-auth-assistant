@@ -76,22 +76,32 @@ async def set_rls_context(
     org_id: str | None,
     is_admin: bool,
     source: str = "request",
+    scope: str = "transaction",
 ) -> None:
-    """Set Postgres RLS GUCs for the remainder of the transaction.
+    """Set Postgres RLS GUCs.
 
     Policies installed by migration 005 check `app.org_id` and `app.is_admin`
     on every tenant-scoped row. This must be called once per request after
     the authenticated principal is known, and also by any system code that
     opens a session directly (bootstrap, workers).
 
-    `source` labels the caller for forensic audit (request / bootstrap /
-    webhook_worker / test). Admin-context activations increment a metric so
-    anomalous spikes are alertable even when the app that set them is
-    compromised — the metric is read from outside the process.
+    `scope`:
+      - "transaction" (default, via `set_config(..., true)`): lasts until the
+        current transaction commits or rolls back. This is what the
+        production request path wants — a commit at the end of the request
+        wipes the context, no leak into the next request sharing the pool.
+      - "session" (via `set_config(..., false)`): persists across commits
+        within the same Postgres connection. Used by test fixtures that
+        call `db.commit()` multiple times and still want the context.
+        Requires NullPool or explicit RESET on session close to prevent
+        leakage between principals in a real pool.
 
-    No-op on non-Postgres dialects. Uses set_config() so the value is
-    parameterized rather than string-interpolated.
+    `source` labels the caller for forensic audit. Admin-context activations
+    increment a metric so anomalous spikes are alertable.
+
+    No-op on non-Postgres dialects.
     """
+    is_local = scope == "transaction"
     dialect = session.bind.dialect.name if session.bind else None
 
     # Only count + log admin bypasses on the dialect where RLS actually
@@ -113,12 +123,12 @@ async def set_rls_context(
     if dialect != "postgresql":
         return
     await session.execute(
-        text("SELECT set_config('app.org_id', :v, true)"),
-        {"v": org_id or ""},
+        text("SELECT set_config('app.org_id', :v, :is_local)"),
+        {"v": org_id or "", "is_local": is_local},
     )
     await session.execute(
-        text("SELECT set_config('app.is_admin', :v, true)"),
-        {"v": "true" if is_admin else "false"},
+        text("SELECT set_config('app.is_admin', :v, :is_local)"),
+        {"v": "true" if is_admin else "false", "is_local": is_local},
     )
 
 
