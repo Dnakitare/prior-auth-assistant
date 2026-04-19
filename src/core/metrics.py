@@ -59,6 +59,13 @@ audit_write_failures_total = Counter(
     registry=REGISTRY,
 )
 
+rls_admin_bypass_total = Counter(
+    "rls_admin_bypass_total",
+    "Postgres RLS admin-context activations (defence-in-depth: spikes indicate a compromise or buggy privileged path)",
+    ["source"],  # request|bootstrap|webhook_worker
+    registry=REGISTRY,
+)
+
 
 def render_metrics() -> tuple[bytes, str]:
     """Return (body, content-type) suitable for an HTTP response."""

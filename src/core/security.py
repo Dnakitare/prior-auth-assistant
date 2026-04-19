@@ -75,6 +75,7 @@ async def set_rls_context(
     *,
     org_id: str | None,
     is_admin: bool,
+    source: str = "request",
 ) -> None:
     """Set Postgres RLS GUCs for the remainder of the transaction.
 
@@ -83,10 +84,32 @@ async def set_rls_context(
     the authenticated principal is known, and also by any system code that
     opens a session directly (bootstrap, workers).
 
+    `source` labels the caller for forensic audit (request / bootstrap /
+    webhook_worker / test). Admin-context activations increment a metric so
+    anomalous spikes are alertable even when the app that set them is
+    compromised — the metric is read from outside the process.
+
     No-op on non-Postgres dialects. Uses set_config() so the value is
     parameterized rather than string-interpolated.
     """
     dialect = session.bind.dialect.name if session.bind else None
+
+    # Only count + log admin bypasses on the dialect where RLS actually
+    # applies. On SQLite (dev/tests) the "bypass" doesn't bypass anything,
+    # so counting it would drown out meaningful signal from production.
+    if is_admin and dialect == "postgresql":
+        try:
+            from src.core.metrics import rls_admin_bypass_total
+            rls_admin_bypass_total.labels(source=source).inc()
+        except Exception:  # metrics must never break auth
+            pass
+        import structlog as _structlog
+        _structlog.get_logger("rls").info(
+            "rls_admin_bypass",
+            source=source,
+            org_id=org_id,
+        )
+
     if dialect != "postgresql":
         return
     await session.execute(

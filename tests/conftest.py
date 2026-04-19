@@ -19,9 +19,19 @@ import pytest
 import pytest_asyncio
 
 # --- Environment (must be set BEFORE importing application modules) -------
-_TEST_DB_FILE = Path(__file__).resolve().parent / "test.db"
-if _TEST_DB_FILE.exists():
-    _TEST_DB_FILE.unlink()
+# Two supported backends:
+#   * SQLite (default for fast local runs)
+#   * Postgres (CI job; required to exercise RLS enforcement)
+# If DATABASE_URL is already set and points at Postgres, we trust it and
+# assume migrations have been applied externally (see .github/workflows/ci.yml).
+_PRESET_DB_URL = os.environ.get("DATABASE_URL", "")
+_USING_POSTGRES = _PRESET_DB_URL.startswith("postgresql")
+
+if not _USING_POSTGRES:
+    _TEST_DB_FILE = Path(__file__).resolve().parent / "test.db"
+    if _TEST_DB_FILE.exists():
+        _TEST_DB_FILE.unlink()
+    os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB_FILE}"
 
 # Generate a Fernet key inline so tests don't require operator setup.
 from cryptography.fernet import Fernet as _Fernet  # noqa: E402
@@ -29,7 +39,6 @@ from cryptography.fernet import Fernet as _Fernet  # noqa: E402
 os.environ.setdefault("APP_ENV", "development")
 os.environ.setdefault("DEBUG", "true")
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-key-for-testing")
-os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB_FILE}"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-testing-" + "x" * 32)
 os.environ.setdefault("AUDIT_HMAC_KEY", "test-audit-hmac-key-" + "y" * 32)
 os.environ.setdefault("PHI_ENCRYPTION_KEYS", _Fernet.generate_key().decode())
@@ -39,7 +48,40 @@ os.environ.setdefault("RATE_LIMIT_BACKEND", "memory")
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 from src.api.main import app  # noqa: E402
-from src.core.database import Base, async_session_maker, engine  # noqa: E402
+from src.core import database as _database_module  # noqa: E402
+from src.core.database import Base, async_session_maker as _original_session_maker, engine  # noqa: E402
+
+
+# Test-only session wrapper: opens an admin-context session so direct
+# fixture inserts aren't blocked by Postgres RLS. Production code paths
+# that need tenant scoping go through FastAPI's get_session dependency,
+# which is independent of this wrapper. Tests that specifically need a
+# non-admin context (e.g., tests/test_rls.py) override inside their own
+# session body.
+class _AdminContextSession:
+    def __init__(self, inner_cm):
+        self._inner_cm = inner_cm
+        self._session = None
+
+    async def __aenter__(self):
+        self._session = await self._inner_cm.__aenter__()
+        from src.core.security import set_rls_context
+        await set_rls_context(self._session, org_id=None, is_admin=True, source="test")
+        return self._session
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return await self._inner_cm.__aexit__(exc_type, exc, tb)
+
+
+def _test_session_maker(*args, **kwargs):
+    return _AdminContextSession(_original_session_maker(*args, **kwargs))
+
+
+# Replace the module-level attribute so test imports of the form
+# `from src.core.database import async_session_maker` resolve to the
+# admin-context wrapper. Must happen before any test module is imported.
+_database_module.async_session_maker = _test_session_maker
+async_session_maker = _test_session_maker
 from src.core.db_models import (  # noqa: E402,F401
     ApiKeyRecord,
     AppealRecord,
@@ -72,11 +114,36 @@ def event_loop():
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _init_schema():
-    """Create all tables once per test session and seed two tenant API keys."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Schema + seed. On SQLite we create tables from metadata; on Postgres
+    we assume migrations have already run (CI applies them before pytest).
+    Either way, we seed two tenants and bypass RLS via the admin context so
+    the seed rows land in the table regardless of policies."""
+    from src.core.security import set_rls_context
+
+    if _USING_POSTGRES:
+        # Wipe any state left by a prior run so tests are deterministic.
+        from sqlalchemy import text
+
+        async with engine.begin() as conn:
+            for table in [
+                "webhook_deliveries",
+                "webhook_endpoints",
+                "audit_log",
+                "appeals",
+                "org_quotas",
+                "user_sessions",
+                "api_keys",
+                "payer_rules",
+                "payers",
+            ]:
+                await conn.execute(text(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE"))
+    else:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     async with async_session_maker() as db:
+        # Seed with the admin context active so RLS (if enabled) allows the write.
+        await set_rls_context(db, org_id=None, is_admin=True, source="test")
         db.add(
             ApiKeyRecord(
                 id=str(uuid.uuid4()),

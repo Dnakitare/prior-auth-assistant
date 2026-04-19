@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast feedback loop: SQLite default backend, no services.
+  test-sqlite:
+    name: tests (sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: pytest
+        env:
+          APP_ENV: development
+        run: pytest -q --no-header
+
+  # Postgres path: exercises migrations + RLS enforcement. These are the
+  # tests that actually ride on policies created by migration 005.
+  test-postgres:
+    name: tests (postgres + rls)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: prior_auth
+          POSTGRES_PASSWORD: prior_auth_ci
+          POSTGRES_DB: prior_auth_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U prior_auth -d prior_auth_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://prior_auth:prior_auth_ci@localhost:5432/prior_auth_ci
+          JWT_SECRET_KEY: ci-jwt-secret-key-thirty-two-chars-or-more-xxxxxx
+          AUDIT_HMAC_KEY: ci-audit-hmac-key-thirty-two-chars-or-more-xxxxxx
+          APP_ENV: development
+        run: python -m scripts.migrate upgrade head
+      - name: pytest (RLS enforcement tests run here)
+        env:
+          DATABASE_URL: postgresql+asyncpg://prior_auth:prior_auth_ci@localhost:5432/prior_auth_ci
+          JWT_SECRET_KEY: ci-jwt-secret-key-thirty-two-chars-or-more-xxxxxx
+          AUDIT_HMAC_KEY: ci-audit-hmac-key-thirty-two-chars-or-more-xxxxxx
+          APP_ENV: development
+        run: pytest -q --no-header
