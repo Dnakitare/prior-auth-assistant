@@ -11,6 +11,7 @@ emit to structlog for log shipping and real-time alerting.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -21,7 +22,6 @@ from typing import Any
 
 import structlog
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.audit_sink import get_audit_sink
@@ -76,12 +76,16 @@ def _hmac(prev: str | None, event_bytes: bytes) -> str:
     return mac.hexdigest()
 
 
-MAX_SEQUENCE_RETRIES = 5
-
 # Arbitrary but stable key for the audit chain advisory lock. Postgres
 # advisory locks are int-keyed; this is hash("audit_log_chain") truncated
 # to a signed 32-bit int. Any Postgres-only serialization point is fine.
 _AUDIT_ADVISORY_LOCK_KEY = 0x41444954  # "ADIT" in ASCII
+
+# In-process lock used on non-Postgres backends (SQLite tests) where
+# pg_advisory_xact_lock is unavailable. Coroutines in the same process
+# serialize on this; it's not meaningful across processes (don't rely on
+# it for real concurrency — the Postgres path is authoritative).
+_audit_process_lock = asyncio.Lock()
 
 
 class AuditLogger:
@@ -107,13 +111,12 @@ class AuditLogger:
 
         Concurrency model:
         - Postgres: acquire a transaction-scoped advisory lock so only one
-          writer at a time computes the tail and inserts. Released on commit/
-          rollback. This serializes audit writes without blocking unrelated
-          traffic — cheap because audit is off the hot read path.
-        - SQLite: no-op lock; tests don't run the concurrency assertion
-          against a SQLite bind.
-        - If the lock-and-insert still conflicts (shouldn't under the lock
-          but defensive), retry up to MAX_SEQUENCE_RETRIES via savepoint.
+          writer at a time computes the tail and inserts. Released on
+          commit/rollback. With the lock held we compute next_sequence and
+          row_hmac from a consistent tail, insert, and return. No retry
+          needed — the lock already serializes the contended region.
+        - SQLite: no lock; the concurrency assertion test isn't run against
+          a SQLite bind.
         """
         is_postgres = (db.bind.dialect.name if db.bind else None) == "postgresql"
         timestamp = datetime.now(timezone.utc)
@@ -134,17 +137,21 @@ class AuditLogger:
             "metadata": metadata,
         }
 
+        # Serialization:
+        #  - Postgres → pg_advisory_xact_lock (released on commit/rollback)
+        #  - anything else (SQLite tests) → in-process asyncio.Lock
+        # Both ensure the read-tail-then-insert window is critical-section'd.
         if is_postgres:
-            # Released automatically at commit/rollback of the current tx.
             await db.execute(
                 text("SELECT pg_advisory_xact_lock(:k)"),
                 {"k": _AUDIT_ADVISORY_LOCK_KEY},
             )
+            locked_locally = False
+        else:
+            await _audit_process_lock.acquire()
+            locked_locally = True
 
-        last_error: Exception | None = None
-        for attempt in range(MAX_SEQUENCE_RETRIES):
-            # Re-read the tail every attempt: on a conflict the winner has
-            # incremented sequence and we must re-link to their row_hmac.
+        try:
             tail = await db.execute(
                 select(AuditLogRecord.row_hmac, AuditLogRecord.sequence)
                 .order_by(AuditLogRecord.sequence.desc())
@@ -175,34 +182,20 @@ class AuditLogger:
                 prev_hmac=prev,
                 row_hmac=row_hmac,
             )
+            db.add(record)
+            await db.flush()
+        finally:
+            if locked_locally:
+                _audit_process_lock.release()
 
-            # Savepoint so the outer transaction survives conflicts.
-            try:
-                async with db.begin_nested():
-                    db.add(record)
-            except IntegrityError as e:
-                last_error = e
-                audit_logger.debug(
-                    "audit_sequence_conflict",
-                    attempt=attempt + 1,
-                    sequence=next_sequence,
-                )
-                continue
-
-            if success:
-                audit_logger.info("audit_event", **event_core)
-            else:
-                audit_logger.warning("audit_event", **event_core)
-            # Ship to external sink (CloudWatch or no-op). Enqueue only —
-            # delivery happens asynchronously and cannot block this path.
-            await get_audit_sink().ship(
-                {**event_core, "sequence": next_sequence, "row_hmac": row_hmac}
-            )
-            return record
-
-        raise RuntimeError(
-            f"audit log sequence contention after {MAX_SEQUENCE_RETRIES} retries"
-        ) from last_error
+        if success:
+            audit_logger.info("audit_event", **event_core)
+        else:
+            audit_logger.warning("audit_event", **event_core)
+        await get_audit_sink().ship(
+            {**event_core, "sequence": next_sequence, "row_hmac": row_hmac}
+        )
+        return record
 
     async def safe_log(self, **kwargs: Any) -> AuditLogRecord | None:
         """Best-effort audit. Logs failures to structlog but never raises.
