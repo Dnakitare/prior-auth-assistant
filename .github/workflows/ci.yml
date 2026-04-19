@@ -58,6 +58,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Demote role from superuser (so RLS applies)
+        # postgres:alpine creates POSTGRES_USER as SUPERUSER, and Postgres
+        # superusers bypass RLS regardless of FORCE. Strip the attribute so
+        # the tests mirror production behaviour where the runtime role is
+        # a non-superuser table owner.
+        env:
+          PGPASSWORD: postgres
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client >/dev/null
+          # Connect as the service-provisioned superuser to demote prior_auth.
+          # The postgres image exposes a superuser named after POSTGRES_USER;
+          # we use the same credentials to issue the ALTER.
+          PGPASSWORD=prior_auth_ci psql -h localhost -U prior_auth -d prior_auth_ci \
+            -c "ALTER ROLE prior_auth NOSUPERUSER;"
+          PGPASSWORD=prior_auth_ci psql -h localhost -U prior_auth -d prior_auth_ci \
+            -c "SELECT rolname, rolsuper FROM pg_roles WHERE rolname='prior_auth';"
+
       - name: Apply migrations
         env:
           DATABASE_URL: postgresql+asyncpg://prior_auth:prior_auth_ci@localhost:5432/prior_auth_ci
