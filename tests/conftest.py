@@ -172,7 +172,7 @@ async def _init_schema():
     yield
 
     await engine.dispose()
-    if _TEST_DB_FILE.exists():
+    if not _USING_POSTGRES and _TEST_DB_FILE.exists():
         _TEST_DB_FILE.unlink()
 
 

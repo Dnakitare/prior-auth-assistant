@@ -10,9 +10,6 @@ read / write that org's rows. An admin escape hatch `app.is_admin = 'true'`
 unlocks cross-tenant access for global admins.
 
 FORCE ROW LEVEL SECURITY is applied so even the table owner is subject.
-Alembic migrations run with their own session and should set
-`app.is_admin = 'true'` before any data operations; this migration doesn't
-touch data so no bypass is required here.
 
 Postgres-only. SQLite tests skip this migration because tests don't run
 alembic; they use SQLAlchemy metadata.create_all and SQLite ignores RLS.
@@ -37,79 +34,45 @@ _TABLES_WITH_ORG_ID = [
 ]
 
 
-def _policy_sql(table: str) -> str:
-    """Policy predicate: admin bypass OR org_id matches the session GUC.
-
-    Empty `app.org_id` is treated as "no org in context" and denies access,
-    which is the fail-closed default.
-    """
-    return f"""
-    DO $$
-    BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_policies WHERE schemaname = current_schema()
-              AND tablename = '{table}' AND policyname = 'tenant_isolation'
-        ) THEN
-            EXECUTE $POLICY$
-                CREATE POLICY tenant_isolation ON {table}
-                USING (
-                    current_setting('app.is_admin', true) = 'true'
-                    OR (
-                        current_setting('app.org_id', true) <> ''
-                        AND org_id = current_setting('app.org_id', true)
-                    )
-                )
-                WITH CHECK (
-                    current_setting('app.is_admin', true) = 'true'
-                    OR (
-                        current_setting('app.org_id', true) <> ''
-                        AND org_id = current_setting('app.org_id', true)
-                    )
-                )
-            $POLICY$;
-        END IF;
-    END
-    $$;
-    """
+_TENANT_POLICY_CLAUSE = """
+USING (
+    current_setting('app.is_admin', true) = 'true'
+    OR (
+        current_setting('app.org_id', true) <> ''
+        AND org_id = current_setting('app.org_id', true)
+    )
+)
+WITH CHECK (
+    current_setting('app.is_admin', true) = 'true'
+    OR (
+        current_setting('app.org_id', true) <> ''
+        AND org_id = current_setting('app.org_id', true)
+    )
+)
+"""
 
 
-def _audit_policy_sql() -> str:
-    """audit_log allows nullable org_id (e.g. login failures with no principal)
-    to be read by admins only; scoped rows follow the usual tenant rule.
-    """
-    return """
-    DO $$
-    BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_policies WHERE schemaname = current_schema()
-              AND tablename = 'audit_log' AND policyname = 'tenant_isolation'
-        ) THEN
-            EXECUTE $POLICY$
-                CREATE POLICY tenant_isolation ON audit_log
-                USING (
-                    current_setting('app.is_admin', true) = 'true'
-                    OR (
-                        current_setting('app.org_id', true) <> ''
-                        AND org_id = current_setting('app.org_id', true)
-                    )
-                )
-                WITH CHECK (
-                    current_setting('app.is_admin', true) = 'true'
-                    OR (
-                        current_setting('app.org_id', true) <> ''
-                        AND (org_id IS NULL OR org_id = current_setting('app.org_id', true))
-                    )
-                )
-            $POLICY$;
-        END IF;
-    END
-    $$;
-    """
+# audit_log allows null org_id (e.g. login failures with no principal) for
+# admin writes. Tenants only see their own org's rows.
+_AUDIT_POLICY_CLAUSE = """
+USING (
+    current_setting('app.is_admin', true) = 'true'
+    OR (
+        current_setting('app.org_id', true) <> ''
+        AND org_id = current_setting('app.org_id', true)
+    )
+)
+WITH CHECK (
+    current_setting('app.is_admin', true) = 'true'
+    OR (
+        current_setting('app.org_id', true) <> ''
+        AND (org_id IS NULL OR org_id = current_setting('app.org_id', true))
+    )
+)
+"""
 
 
 def upgrade() -> None:
-    # Postgres-only; skip cleanly on SQLite (alembic won't be pointed at sqlite
-    # in production, but this keeps the migration portable for local fiddling).
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
@@ -117,11 +80,11 @@ def upgrade() -> None:
     for table in _TABLES_WITH_ORG_ID:
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
-        op.execute(_policy_sql(table))
+        op.execute(f"CREATE POLICY tenant_isolation ON {table} {_TENANT_POLICY_CLAUSE}")
 
     op.execute("ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE audit_log FORCE ROW LEVEL SECURITY")
-    op.execute(_audit_policy_sql())
+    op.execute(f"CREATE POLICY tenant_isolation ON audit_log {_AUDIT_POLICY_CLAUSE}")
 
 
 def downgrade() -> None:

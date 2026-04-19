@@ -20,7 +20,7 @@ from enum import Enum
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,6 +78,11 @@ def _hmac(prev: str | None, event_bytes: bytes) -> str:
 
 MAX_SEQUENCE_RETRIES = 5
 
+# Arbitrary but stable key for the audit chain advisory lock. Postgres
+# advisory locks are int-keyed; this is hash("audit_log_chain") truncated
+# to a signed 32-bit int. Any Postgres-only serialization point is fine.
+_AUDIT_ADVISORY_LOCK_KEY = 0x41444954  # "ADIT" in ASCII
+
 
 class AuditLogger:
     async def log(
@@ -100,12 +105,17 @@ class AuditLogger:
     ) -> AuditLogRecord:
         """Persist an audit row, linking it into the HMAC chain, and emit a log line.
 
-        Concurrency model: sequence + prev_hmac are computed from the current
-        tail. Two concurrent writers can compute the same next sequence; the
-        unique constraint on sequence rejects the loser. We retry by wrapping
-        the whole compute+insert in a savepoint (SQLAlchemy nested transaction)
-        so the outer transaction survives the integrity error.
+        Concurrency model:
+        - Postgres: acquire a transaction-scoped advisory lock so only one
+          writer at a time computes the tail and inserts. Released on commit/
+          rollback. This serializes audit writes without blocking unrelated
+          traffic — cheap because audit is off the hot read path.
+        - SQLite: no-op lock; tests don't run the concurrency assertion
+          against a SQLite bind.
+        - If the lock-and-insert still conflicts (shouldn't under the lock
+          but defensive), retry up to MAX_SEQUENCE_RETRIES via savepoint.
         """
+        is_postgres = (db.bind.dialect.name if db.bind else None) == "postgresql"
         timestamp = datetime.now(timezone.utc)
         event_core = {
             "action": action.value,
@@ -123,6 +133,13 @@ class AuditLogger:
             "phi_types": phi_types or [],
             "metadata": metadata,
         }
+
+        if is_postgres:
+            # Released automatically at commit/rollback of the current tx.
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(:k)"),
+                {"k": _AUDIT_ADVISORY_LOCK_KEY},
+            )
 
         last_error: Exception | None = None
         for attempt in range(MAX_SEQUENCE_RETRIES):
