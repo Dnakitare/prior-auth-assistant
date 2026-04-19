@@ -65,7 +65,17 @@ class AppealRecord(Base):
         String(36), ForeignKey("payers.id"), nullable=True, index=True
     )
     denial_reason: Mapped[str] = mapped_column(
-        Enum(DenialReason), default=DenialReason.OTHER, nullable=False
+        # values_callable pins storage to the enum's value (e.g. "medical_necessity")
+        # rather than its name ("MEDICAL_NECESSITY"). Postgres ENUM type was
+        # created in migration 001 with the lowercase values; SQLite is
+        # permissive so the bug was invisible until the Postgres CI job ran.
+        Enum(
+            DenialReason,
+            values_callable=lambda e: [m.value for m in e],
+            name="denialreason",
+        ),
+        default=DenialReason.OTHER,
+        nullable=False,
     )
     denial_reason_text: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
     denial_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -134,7 +144,14 @@ class PayerRuleRecord(Base):
 
     procedure_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     diagnosis_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    denial_reason: Mapped[str | None] = mapped_column(Enum(DenialReason), nullable=True)
+    denial_reason: Mapped[str | None] = mapped_column(
+        Enum(
+            DenialReason,
+            values_callable=lambda e: [m.value for m in e],
+            name="denialreason",
+        ),
+        nullable=True,
+    )
 
     rule_name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

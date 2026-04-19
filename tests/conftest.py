@@ -38,6 +38,9 @@ from cryptography.fernet import Fernet as _Fernet  # noqa: E402
 
 os.environ.setdefault("APP_ENV", "development")
 os.environ.setdefault("DEBUG", "true")
+# Force NullPool for tests — pytest-asyncio's function-scoped event loops
+# otherwise leave pooled asyncpg connections attached to closed loops.
+os.environ.setdefault("DATABASE_USE_NULLPOOL", "1")
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-key-for-testing")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-testing-" + "x" * 32)
 os.environ.setdefault("AUDIT_HMAC_KEY", "test-audit-hmac-key-" + "y" * 32)

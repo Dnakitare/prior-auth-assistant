@@ -1,5 +1,6 @@
 """Database configuration and session management."""
 
+import os
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -33,6 +34,19 @@ def _engine_kwargs() -> dict:
                 "application_name": settings.app_name,
             }
         }
+    # Test runs under pytest-asyncio use function-scoped event loops; asyncpg
+    # connections held in a shared pool end up orphaned when the loop closes,
+    # producing "Event loop is closed" crashes on the next test. NullPool
+    # disables pooling — each session opens and closes a fresh connection
+    # bound to the current test's loop. Opt in via env var so production
+    # keeps the pool.
+    if os.environ.get("DATABASE_USE_NULLPOOL") == "1":
+        from sqlalchemy.pool import NullPool
+        kwargs.pop("pool_size", None)
+        kwargs.pop("max_overflow", None)
+        kwargs.pop("pool_timeout", None)
+        kwargs.pop("pool_recycle", None)
+        kwargs["poolclass"] = NullPool
     return kwargs
 
 
