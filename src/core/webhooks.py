@@ -191,6 +191,9 @@ class WebhookDeliveryWorker:
 
     async def _tick(self, client: httpx.AsyncClient) -> None:
         async with async_session_maker() as db:
+            # Worker must see deliveries across every tenant.
+            from src.core.security import set_rls_context
+            await set_rls_context(db, org_id=None, is_admin=True)
             pending = await _pending_deliveries(db, self.batch)
             for delivery in pending:
                 await deliver_one(db, delivery, client)

@@ -19,7 +19,7 @@ import jwt
 from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
@@ -68,6 +68,35 @@ def generate_api_key() -> tuple[str, str]:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def set_rls_context(
+    session: AsyncSession,
+    *,
+    org_id: str | None,
+    is_admin: bool,
+) -> None:
+    """Set Postgres RLS GUCs for the remainder of the transaction.
+
+    Policies installed by migration 005 check `app.org_id` and `app.is_admin`
+    on every tenant-scoped row. This must be called once per request after
+    the authenticated principal is known, and also by any system code that
+    opens a session directly (bootstrap, workers).
+
+    No-op on non-Postgres dialects. Uses set_config() so the value is
+    parameterized rather than string-interpolated.
+    """
+    dialect = session.bind.dialect.name if session.bind else None
+    if dialect != "postgresql":
+        return
+    await session.execute(
+        text("SELECT set_config('app.org_id', :v, true)"),
+        {"v": org_id or ""},
+    )
+    await session.execute(
+        text("SELECT set_config('app.is_admin', :v, true)"),
+        {"v": "true" if is_admin else "false"},
+    )
 
 
 async def create_access_token(
@@ -225,12 +254,16 @@ async def get_current_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key",
             )
-        return AuthenticatedUser(
+        user = AuthenticatedUser(
             user_id=f"apikey:{record.id}",
             org_id=record.org_id,
             scopes=record.scopes or [],
             auth_method="api_key",
         )
+        await set_rls_context(
+            db, org_id=user.org_id, is_admin="admin" in user.scopes
+        )
+        return user
 
     if bearer:
         result = await _validate_jwt(db, bearer.credentials)
@@ -241,13 +274,17 @@ async def get_current_user(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         payload, _row = result
-        return AuthenticatedUser(
+        user = AuthenticatedUser(
             user_id=payload.sub,
             org_id=payload.org_id,
             scopes=payload.scope,
             auth_method="jwt",
             session_id=payload.jti,
         )
+        await set_rls_context(
+            db, org_id=user.org_id, is_admin="admin" in user.scopes
+        )
+        return user
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

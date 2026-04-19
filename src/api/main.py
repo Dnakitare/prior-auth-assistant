@@ -80,6 +80,10 @@ async def _seed_bootstrap_api_keys() -> None:
     import uuid
 
     async with async_session_maker() as db:
+        # System path: bypass RLS to seed keys across all orgs.
+        from src.core.security import set_rls_context
+        await set_rls_context(db, org_id=None, is_admin=True)
+
         for raw_key in settings.bootstrap_api_keys:
             key_hash = hash_api_key(raw_key)
             existing = await db.execute(

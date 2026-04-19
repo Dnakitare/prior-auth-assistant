@@ -11,7 +11,7 @@ AI-powered prior authorization appeals automation for healthcare providers. Extr
 - **OCR**: AWS Textract (with a mock provider for local development).
 - **LLM extraction**: Claude extracts payer, denial reason, codes, deadlines. Hallucinated codes are dropped via post-validation against the source text.
 - **Appeal generation**: 9 denial-type templates, enhanced by Claude with role-separated system prompts, nonced delimiters, and prompt caching.
-- **Tenant isolation**: every PHI query is scoped by `org_id`; cross-tenant reads return 404.
+- **Tenant isolation**: every PHI query is scoped by `org_id`; cross-tenant reads return 404. Postgres **row-level security** enforces the boundary at the database layer too: even a query that forgets the `WHERE org_id = …` clause can't leak rows from another tenant.
 - **PHI encryption at rest**: Fernet/MultiFernet field-level encryption for `patient_name`, `member_id`, `claim_number`, `denial_reason_text`, `denial_text`, `appeal_letter`, and diagnosis codes.
 - **Audit log**: append-only `audit_log` table with an HMAC-SHA256 hash chain. `audit.verify_chain()` detects insertion, deletion, or modification.
 - **Distributed rate limiting**: Redis fixed-window, keyed by API key / JWT subject (falls back to IP only for unauthenticated traffic).
@@ -150,6 +150,7 @@ See `.env.example` for the full list including tunables.
 ### Authentication & authorization
 
 - API keys are stored as SHA-256 hashes in the `api_keys` table; plaintext is never persisted. Comparison uses `hmac.compare_digest` for defence-in-depth constant time.
+- **Postgres RLS** (migration 005) enables FORCE ROW LEVEL SECURITY on every tenant-scoped table (`appeals`, `audit_log`, `webhook_endpoints`, `webhook_deliveries`, `api_keys`, `org_quotas`). Policies check `app.org_id` and `app.is_admin` GUCs, which `get_current_user` sets via `set_config()` once per request. System paths (bootstrap seeding, webhook worker) explicitly set `app.is_admin='true'`. A bug that forgets to filter by `org_id` in the ORM still cannot return cross-tenant rows.
 - JWTs reference a `user_sessions` row (`jti` claim = row id). Revoking the row instantly invalidates the token — `/auth/logout` does this for the caller, admin endpoints can revoke any session.
 - Scopes: `appeals:read`, `appeals:write`, `admin`. `require_scope` returns 403 to under-privileged tokens.
 
