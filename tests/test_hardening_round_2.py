@@ -69,24 +69,22 @@ class TestAuditSequenceConcurrency:
 
 class TestAuditSafeLog:
     @pytest.mark.asyncio
-    async def test_safe_log_swallows_errors(self):
-        """safe_log returns None on error but doesn't raise."""
+    async def test_safe_log_swallows_errors(self, monkeypatch):
+        """safe_log returns None on error but doesn't raise.
 
-        class _BrokenSession:
-            async def execute(self, *a, **kw):
-                raise RuntimeError("simulated DB failure")
+        audit.log now opens its own admin-context session for the write,
+        so the `db` param is no longer the failure injection point. We
+        patch the admin session maker to raise instead.
+        """
+        import src.core.audit as audit_mod
 
-            def add(self, *a, **kw):
-                pass
+        def _broken_maker(*a, **kw):
+            raise RuntimeError("simulated admin session failure")
 
-            async def flush(self):
-                pass
-
-            def begin_nested(self):
-                raise RuntimeError("simulated DB failure")
+        monkeypatch.setattr(audit_mod, "async_admin_session_maker", _broken_maker)
 
         result = await audit.safe_log(
-            db=_BrokenSession(),
+            db=None,  # unused now
             action=AuditAction.APPEAL_READ,
             user_id="u",
             resource_id="r",

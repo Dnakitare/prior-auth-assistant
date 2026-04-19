@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.audit_sink import get_audit_sink
 from src.core.config import settings
+from src.core.database import async_admin_session_maker
 from src.core.db_models import AuditLogRecord
 from src.core.metrics import audit_write_failures_total
 
@@ -109,16 +110,23 @@ class AuditLogger:
     ) -> AuditLogRecord:
         """Persist an audit row, linking it into the HMAC chain, and emit a log line.
 
+        The `db` parameter is accepted for API compatibility but NOT used
+        for the audit INSERT. Audit writes open their own admin-context
+        session (via async_admin_session_maker) because:
+          - The sequence counter is global, not tenant-scoped. A
+            tenant-scoped caller would read a filtered tail view and
+            produce a stale next_sequence that collides with rows in
+            other orgs.
+          - Audit integrity should survive caller-transaction rollbacks:
+            a failed business op is precisely when we most want the
+            audit trail.
+
         Concurrency model:
-        - Postgres: acquire a transaction-scoped advisory lock so only one
-          writer at a time computes the tail and inserts. Released on
-          commit/rollback. With the lock held we compute next_sequence and
-          row_hmac from a consistent tail, insert, and return. No retry
-          needed — the lock already serializes the contended region.
-        - SQLite: no lock; the concurrency assertion test isn't run against
-          a SQLite bind.
+        - Postgres: `pg_advisory_xact_lock` inside the admin session
+          serializes writers. Released on commit/rollback.
+        - SQLite: in-process asyncio Lock serves the equivalent role
+          for tests.
         """
-        is_postgres = (db.bind.dialect.name if db.bind else None) == "postgresql"
         timestamp = datetime.now(timezone.utc)
         event_core = {
             "action": action.value,
@@ -137,56 +145,89 @@ class AuditLogger:
             "metadata": metadata,
         }
 
-        # Serialization:
-        #  - Postgres → pg_advisory_xact_lock (released on commit/rollback)
-        #  - anything else (SQLite tests) → in-process asyncio.Lock
-        # Both ensure the read-tail-then-insert window is critical-section'd.
-        if is_postgres:
-            await db.execute(
-                text("SELECT pg_advisory_xact_lock(:k)"),
-                {"k": _AUDIT_ADVISORY_LOCK_KEY},
-            )
-            locked_locally = False
+        # Dialect-branch: SQLite allows one writer at a time, so a second
+        # session racing the caller's open tx deadlocks. On SQLite we use
+        # the caller's session (RLS is absent there anyway). On Postgres
+        # we open a dedicated admin-context session so the tail SELECT
+        # isn't tenant-filtered.
+        caller_is_postgres = (
+            (db.bind.dialect.name if db is not None and db.bind else None)
+            == "postgresql"
+        )
+
+        if caller_is_postgres:
+            audit_db_cm = async_admin_session_maker()
+            use_own_session = True
         else:
-            await _audit_process_lock.acquire()
-            locked_locally = True
+            # Dummy async context manager that yields the caller's session
+            # without taking ownership of it (caller commits on their own).
+            class _CallerDbCm:
+                async def __aenter__(self_):
+                    return db
+                async def __aexit__(self_, *a):
+                    return False
+            audit_db_cm = _CallerDbCm()
+            use_own_session = False
 
-        try:
-            tail = await db.execute(
-                select(AuditLogRecord.row_hmac, AuditLogRecord.sequence)
-                .order_by(AuditLogRecord.sequence.desc())
-                .limit(1)
-            )
-            tail_row = tail.first()
-            prev = tail_row[0] if tail_row else None
-            next_sequence = (tail_row[1] + 1) if tail_row else 1
-            row_hmac = _hmac(prev, _canonical(event_core))
+        async with audit_db_cm as audit_db:
+            if use_own_session:
+                from src.core.security import set_rls_context
+                await set_rls_context(
+                    audit_db, org_id=None, is_admin=True,
+                    source="audit_write", scope="session",
+                )
 
-            record = AuditLogRecord(
-                id=str(uuid.uuid4()),
-                sequence=next_sequence,
-                timestamp=timestamp,
-                action=action.value,
-                user_id=user_id,
-                org_id=org_id,
-                resource_type=resource_type,
-                resource_id=resource_id,
-                ip_address=ip_address,
-                user_agent=user_agent,
-                request_id=request_id,
-                success=success,
-                error_message=error_message,
-                contains_phi=contains_phi,
-                phi_types=phi_types or [],
-                metadata_json=metadata,
-                prev_hmac=prev,
-                row_hmac=row_hmac,
-            )
-            db.add(record)
-            await db.flush()
-        finally:
-            if locked_locally:
-                _audit_process_lock.release()
+            is_postgres = caller_is_postgres
+            if is_postgres:
+                # Key hardcoded inline — asyncpg occasionally mis-types the
+                # bigint bind for pg_advisory_xact_lock.
+                await audit_db.execute(
+                    text(f"SELECT pg_advisory_xact_lock({_AUDIT_ADVISORY_LOCK_KEY})")
+                )
+                locked_locally = False
+            else:
+                await _audit_process_lock.acquire()
+                locked_locally = True
+
+            try:
+                tail = await audit_db.execute(
+                    select(AuditLogRecord.row_hmac, AuditLogRecord.sequence)
+                    .order_by(AuditLogRecord.sequence.desc())
+                    .limit(1)
+                )
+                tail_row = tail.first()
+                prev = tail_row[0] if tail_row else None
+                next_sequence = (tail_row[1] + 1) if tail_row else 1
+                row_hmac = _hmac(prev, _canonical(event_core))
+
+                record = AuditLogRecord(
+                    id=str(uuid.uuid4()),
+                    sequence=next_sequence,
+                    timestamp=timestamp,
+                    action=action.value,
+                    user_id=user_id,
+                    org_id=org_id,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    request_id=request_id,
+                    success=success,
+                    error_message=error_message,
+                    contains_phi=contains_phi,
+                    phi_types=phi_types or [],
+                    metadata_json=metadata,
+                    prev_hmac=prev,
+                    row_hmac=row_hmac,
+                )
+                audit_db.add(record)
+                if use_own_session:
+                    await audit_db.commit()
+                else:
+                    await audit_db.flush()
+            finally:
+                if locked_locally:
+                    _audit_process_lock.release()
 
         if success:
             audit_logger.info("audit_event", **event_core)
