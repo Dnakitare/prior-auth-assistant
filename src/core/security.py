@@ -122,13 +122,17 @@ async def set_rls_context(
 
     if dialect != "postgresql":
         return
+    # set_config's third arg (is_local) is a bool literal in SQL; bake the
+    # correct value into the query text instead of binding it, to dodge any
+    # driver-side parameter-type ambiguity.
+    scope_literal = "true" if is_local else "false"
     await session.execute(
-        text("SELECT set_config('app.org_id', :v, :is_local)"),
-        {"v": org_id or "", "is_local": is_local},
+        text(f"SELECT set_config('app.org_id', :v, {scope_literal})"),
+        {"v": org_id or ""},
     )
     await session.execute(
-        text("SELECT set_config('app.is_admin', :v, :is_local)"),
-        {"v": "true" if is_admin else "false", "is_local": is_local},
+        text(f"SELECT set_config('app.is_admin', :v, {scope_literal})"),
+        {"v": "true" if is_admin else "false"},
     )
 
 
