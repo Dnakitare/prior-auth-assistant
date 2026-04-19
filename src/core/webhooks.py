@@ -23,7 +23,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
-from src.core.database import async_session_maker
+from src.core.database import async_admin_session_maker
 from src.core.db_models import WebhookDeliveryRecord, WebhookEndpointRecord
 
 logger = structlog.get_logger("webhooks")
@@ -190,10 +190,10 @@ class WebhookDeliveryWorker:
                     continue
 
     async def _tick(self, client: httpx.AsyncClient) -> None:
-        async with async_session_maker() as db:
+        async with async_admin_session_maker() as db:
             # Worker must see deliveries across every tenant.
             from src.core.security import set_rls_context
-            await set_rls_context(db, org_id=None, is_admin=True)
+            await set_rls_context(db, org_id=None, is_admin=True, source="webhook_worker")
             pending = await _pending_deliveries(db, self.batch)
             for delivery in pending:
                 await deliver_one(db, delivery, client)

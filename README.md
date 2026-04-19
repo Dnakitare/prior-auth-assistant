@@ -150,7 +150,8 @@ See `.env.example` for the full list including tunables.
 ### Authentication & authorization
 
 - API keys are stored as SHA-256 hashes in the `api_keys` table; plaintext is never persisted. Comparison uses `hmac.compare_digest` for defence-in-depth constant time.
-- **Postgres RLS** (migration 005) enables FORCE ROW LEVEL SECURITY on every tenant-scoped table (`appeals`, `audit_log`, `webhook_endpoints`, `webhook_deliveries`, `api_keys`, `org_quotas`). Policies check `app.org_id` and `app.is_admin` GUCs, which `get_current_user` sets via `set_config()` once per request. System paths (bootstrap seeding, webhook worker) explicitly set `app.is_admin='true'`. A bug that forgets to filter by `org_id` in the ORM still cannot return cross-tenant rows.
+- **Postgres RLS** (migration 005) enables FORCE ROW LEVEL SECURITY on every tenant-scoped table (`appeals`, `audit_log`, `webhook_endpoints`, `webhook_deliveries`, `api_keys`, `org_quotas`). Policies check `app.org_id` and `app.is_admin` GUCs, which `get_current_user` sets via `set_config()` once per request. A bug that forgets to filter by `org_id` in the ORM still cannot return cross-tenant rows. Every admin-context activation increments `rls_admin_bypass_total{source}` and emits a structlog line for SIEM correlation — alert on anomalous spikes.
+- **Two-role Postgres deployment** (recommended for prod, see `docs/RUNBOOK.md` §9): runtime role has no `BYPASSRLS`; a separate system role connected via `DATABASE_ADMIN_URL` serves privileged paths (bootstrap seeder, webhook worker). An attacker who leaks the runtime DSN gets a role that physically cannot see other tenants.
 - JWTs reference a `user_sessions` row (`jti` claim = row id). Revoking the row instantly invalidates the token — `/auth/logout` does this for the caller, admin endpoints can revoke any session.
 - Scopes: `appeals:read`, `appeals:write`, `admin`. `require_scope` returns 403 to under-privileged tokens.
 

@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql+asyncpg://prior_auth:prior_auth_dev@localhost:5432/prior_auth",
     )
+    # Optional: separate connection URL for privileged system paths (bootstrap
+    # seeder, webhook worker, admin bypass operations). When set, should point
+    # at a Postgres role that has BYPASSRLS (or equivalent) while the primary
+    # database_url points at a restricted runtime role. Reduces the blast
+    # radius of an API-replica compromise: an attacker who leaks the runtime
+    # DSN still can't flip app.is_admin meaningfully because its role is
+    # constrained. Falls back to database_url if unset.
+    database_admin_url: str = Field(default="")
     database_pool_size: int = Field(default=5, ge=1)
     database_max_overflow: int = Field(default=10, ge=0)
     database_pool_timeout: int = Field(default=30, ge=1)

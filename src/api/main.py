@@ -18,7 +18,7 @@ from src.core.metrics import render_metrics
 
 from src.api.routes import admin, appeals, auth, health, payers
 from src.core.config import settings
-from src.core.database import async_session_maker
+from src.core.database import async_admin_session_maker
 from src.core.middleware import (
     BodySizeLimitMiddleware,
     HttpsEnforcementMiddleware,
@@ -79,10 +79,10 @@ async def _seed_bootstrap_api_keys() -> None:
     from sqlalchemy import select
     import uuid
 
-    async with async_session_maker() as db:
+    async with async_admin_session_maker() as db:
         # System path: bypass RLS to seed keys across all orgs.
         from src.core.security import set_rls_context
-        await set_rls_context(db, org_id=None, is_admin=True)
+        await set_rls_context(db, org_id=None, is_admin=True, source="bootstrap")
 
         for raw_key in settings.bootstrap_api_keys:
             key_hash = hash_api_key(raw_key)

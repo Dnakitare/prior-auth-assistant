@@ -236,6 +236,88 @@ process, not a substitute.
 
 ---
 
+## 9. Two-role Postgres deployment (recommended for prod)
+
+Row-level security policies (migration 005) only help when the running
+app can't trivially set `app.is_admin = 'true'`. An API replica will
+always have that capability on its own session — so the real separation
+lives at the Postgres role level.
+
+### Provisioning
+
+```sql
+-- Schema owner used ONLY for migrations. Run scripts/migrate.py under this
+-- role. Not used at runtime.
+CREATE ROLE prior_auth_migrator LOGIN PASSWORD :'migrator_pw';
+GRANT ALL PRIVILEGES ON DATABASE prior_auth TO prior_auth_migrator;
+ALTER DATABASE prior_auth OWNER TO prior_auth_migrator;
+
+-- Runtime role used by API replicas. NOT the table owner, so FORCE RLS
+-- applies. No BYPASSRLS.
+CREATE ROLE prior_auth_runtime LOGIN PASSWORD :'runtime_pw';
+GRANT CONNECT ON DATABASE prior_auth TO prior_auth_runtime;
+GRANT USAGE ON SCHEMA public TO prior_auth_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public
+    TO prior_auth_runtime;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public
+    TO prior_auth_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE prior_auth_migrator IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
+    TO prior_auth_runtime;
+
+-- System role used by bootstrap seeder + webhook worker. Has BYPASSRLS
+-- because it legitimately reads/writes across tenants.
+CREATE ROLE prior_auth_system LOGIN PASSWORD :'system_pw' BYPASSRLS;
+GRANT CONNECT ON DATABASE prior_auth TO prior_auth_system;
+GRANT USAGE ON SCHEMA public TO prior_auth_system;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public
+    TO prior_auth_system;
+```
+
+### Environment
+
+```
+DATABASE_URL       = postgresql+asyncpg://prior_auth_runtime:...@db/prior_auth
+DATABASE_ADMIN_URL = postgresql+asyncpg://prior_auth_system:...@db/prior_auth
+MIGRATE_ON_STARTUP = false   # run migrate as a separate step under prior_auth_migrator
+```
+
+### What this buys
+
+- An attacker who exfiltrates the runtime DSN gets a role that can only
+  see one org's rows (RLS enforced) and cannot promote itself — no
+  BYPASSRLS on that role, and Postgres won't let a non-superuser grant
+  itself BYPASSRLS.
+- Setting `app.is_admin='true'` on the runtime session is a no-op because
+  the role lacks BYPASSRLS: policies still evaluate against the row's
+  `org_id` only.
+- The system DSN should be scoped to the pod running the webhook worker /
+  bootstrap job and rotated independently of API key material.
+
+### What it does NOT buy
+
+- Protection against an attacker who gets the admin DSN. That credential
+  is as sensitive as the Fernet keys — store in a KMS with break-glass
+  access logging.
+- Protection against a compromised migration step. The migrator role owns
+  the schema and can disable RLS. Treat migrations as a privileged CI
+  step, not something replicas trigger.
+
+### Metric to alert on
+
+`rls_admin_bypass_total{source}` — any activation is logged. Expected
+volume:
+
+- `bootstrap`: once per replica startup.
+- `webhook_worker`: once per poll tick (default 5s).
+- `request`: once per authenticated-admin request.
+- `test`: only in non-prod.
+
+A spike in `request` or activations from an unexpected source label is
+a strong signal. Page on it.
+
+---
+
 ## Checklists (drills)
 
 Run on a cadence. Evidence goes in your GRC system.
