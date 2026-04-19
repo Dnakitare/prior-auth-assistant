@@ -55,45 +55,31 @@ from src.core import database as _database_module  # noqa: E402
 from src.core.database import Base, async_session_maker as _original_session_maker, engine  # noqa: E402
 
 
-# Test-only session wrapper: opens an admin-context session so direct
-# fixture inserts aren't blocked by Postgres RLS. Production code paths
-# that need tenant scoping go through FastAPI's get_session dependency,
-# which is independent of this wrapper. Tests that specifically need a
-# non-admin context (e.g., tests/test_rls.py) override inside their own
-# session body.
-class _AdminContextSession:
-    def __init__(self, inner_cm):
-        self._inner_cm = inner_cm
-        self._session = None
+# Test-only RLS setup: rather than wrap the session maker (which loses
+# set_config's session-scope across commit boundaries in some SQLAlchemy
+# paths), register a sync event listener that runs on every new
+# connection. Every test connection therefore starts with app.is_admin
+# set to 'true' — tests that specifically want tenant scoping (test_rls.py)
+# override it by calling set_rls_context explicitly mid-test.
+#
+# Safe because tests use NullPool: every session gets a fresh connection
+# that triggers this listener. No cross-test leakage; each test is
+# effectively an admin session.
+from sqlalchemy import event
 
-    async def __aenter__(self):
-        self._session = await self._inner_cm.__aenter__()
-        from src.core.security import set_rls_context
-        # Session-scoped so the context survives across mid-test db.commit()
-        # calls. Safe because tests use NullPool — each session owns its
-        # connection and discards it on close, so no cross-principal leak.
-        await set_rls_context(
-            self._session,
-            org_id=None,
-            is_admin=True,
-            source="test",
-            scope="session",
-        )
-        return self._session
+@event.listens_for(_database_module.engine.sync_engine, "connect")
+def _set_test_admin_gucs(dbapi_conn, connection_record):
+    if _USING_POSTGRES:
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("SET app.is_admin = 'true'")
+            cursor.execute("SET app.org_id = ''")
+        finally:
+            cursor.close()
 
-    async def __aexit__(self, exc_type, exc, tb):
-        return await self._inner_cm.__aexit__(exc_type, exc, tb)
-
-
-def _test_session_maker(*args, **kwargs):
-    return _AdminContextSession(_original_session_maker(*args, **kwargs))
-
-
-# Replace the module-level attribute so test imports of the form
-# `from src.core.database import async_session_maker` resolve to the
-# admin-context wrapper. Must happen before any test module is imported.
-_database_module.async_session_maker = _test_session_maker
-async_session_maker = _test_session_maker
+# Keep the alias so existing tests that import async_session_maker still
+# work — no wrapper now, it's just the original maker.
+async_session_maker = _original_session_maker
 from src.core.db_models import (  # noqa: E402,F401
     ApiKeyRecord,
     AppealRecord,

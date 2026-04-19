@@ -81,7 +81,10 @@ async def _seed_bootstrap_api_keys() -> None:
 
     async with async_admin_session_maker() as db:
         # System path: bypass RLS to seed keys across all orgs. Session
-        # scope so the context persists across per-key commits.
+        # scope so the context persists across per-key commits. When this
+        # code runs under a role with BYPASSRLS (the recommended prod
+        # pattern via DATABASE_ADMIN_URL), RLS is bypassed regardless and
+        # this is belt-and-braces.
         from src.core.security import set_rls_context
         await set_rls_context(
             db, org_id=None, is_admin=True, source="bootstrap", scope="session"
