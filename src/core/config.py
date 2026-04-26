@@ -142,6 +142,26 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
+    def normalize_database_urls(self):
+        """Coerce hosted-Postgres-style URLs to the asyncpg dialect.
+
+        Railway, Heroku, Render, and friends inject DATABASE_URL with the
+        bare `postgres://` or `postgresql://` scheme. SQLAlchemy needs
+        `postgresql+asyncpg://` for our async engine. Fix it once here so
+        operators don't have to remember.
+        """
+        for attr in ("database_url", "database_admin_url"):
+            value = getattr(self, attr, "")
+            if not value:
+                continue
+            if value.startswith("postgres://"):
+                value = "postgresql+asyncpg://" + value[len("postgres://"):]
+            elif value.startswith("postgresql://") and "+asyncpg" not in value.split("://", 1)[0]:
+                value = "postgresql+asyncpg://" + value[len("postgresql://"):]
+            object.__setattr__(self, attr, value)
+        return self
+
+    @model_validator(mode="after")
     def finalize_jwt_secret(self):
         """Development convenience: if JWT secret is unset outside production, mint one."""
         if self.jwt_secret_key == _JWT_SECRET_UNSET_SENTINEL and self.app_env != "production":

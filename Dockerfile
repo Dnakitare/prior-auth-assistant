@@ -48,7 +48,9 @@ USER appuser
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/health/live || exit 1
+    CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/health/live" || exit 1
 
-# Default to 2 workers; tune with uvicorn --workers or a process manager.
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Shell form so Railway / Heroku-style platforms can inject $PORT.
+# Local docker-compose still works because PORT defaults to 8000.
+# Tune --workers via the WORKERS env var.
+CMD uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WORKERS:-2}
