@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -122,9 +123,15 @@ async def lifespan(app: FastAPI):
     # Schema migrations. In multi-replica deployments these should run as a
     # separate init container or CI job (scripts/migrate.py) with
     # MIGRATE_ON_STARTUP=false to avoid multiple replicas racing.
+    #
+    # We dispatch the sync alembic command onto a worker thread because the
+    # alembic env runs `asyncio.run(run_async_migrations())` internally, and
+    # `asyncio.run()` cannot start a new event loop inside the one uvicorn
+    # already runs the lifespan in. The worker thread has no live loop, so
+    # alembic's nested run() works there.
     if settings.migrate_on_startup:
         try:
-            _run_migrations()
+            await asyncio.to_thread(_run_migrations)
             logger.info("migrations_applied")
         except Exception as e:
             if settings.is_production:

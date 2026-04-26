@@ -8,6 +8,7 @@
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5,
+    "preDeployCommand": "python -m scripts.migrate upgrade head",
     "healthcheckPath": "/health/live",
     "healthcheckTimeout": 180
   }
