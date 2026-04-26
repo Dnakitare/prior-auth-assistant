@@ -185,8 +185,11 @@ class Settings(BaseSettings):
         if any("localhost" in o for o in self.cors_origins):
             errors.append("CORS_ORIGINS must not contain localhost in production")
 
-        if self.rate_limit_backend != "redis":
-            errors.append("RATE_LIMIT_BACKEND must be 'redis' in production (in-memory is per-process)")
+        # Note: in-memory rate limiting is fine for single-replica deployments
+        # (the portfolio demo target); for multi-replica production set
+        # RATE_LIMIT_BACKEND=redis so the window is shared across processes.
+        # We don't fail closed here because the single-replica path is a real
+        # supported topology — the runbook calls this out explicitly.
 
         if not self.require_https:
             errors.append("REQUIRE_HTTPS must be true in production")

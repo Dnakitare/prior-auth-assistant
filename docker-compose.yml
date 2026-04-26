@@ -1,5 +1,9 @@
 # Development compose file. For production use docker-compose.prod.yml.
 # This file mounts the source tree and enables --reload; do not deploy as-is.
+#
+# Redis is opt-in via the `redis` profile. Without it, rate limiting falls
+# back to the in-memory backend (fine for a single API replica). To run with
+# Redis: `docker compose --profile redis up`.
 
 services:
   postgres:
@@ -22,6 +26,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: prior-auth-redis
+    profiles: ["redis"]
     ports:
       - "127.0.0.1:6379:6379"   # loopback only
     volumes:
@@ -41,8 +46,8 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://prior_auth:prior_auth_dev@postgres:5432/prior_auth
-      - REDIS_URL=redis://redis:6379/0
-      - RATE_LIMIT_BACKEND=memory
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-memory}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - APP_ENV=development
       - DEBUG=true
@@ -50,8 +55,6 @@ services:
       - PHI_ENCRYPTION_KEYS=${PHI_ENCRYPTION_KEYS:-}
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     volumes:
       - ./src:/app/src:ro
