@@ -39,8 +39,10 @@ COPY --from=build /install /usr/local
 COPY src/ ./src/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./alembic.ini
+COPY scripts/entrypoint.sh ./scripts/entrypoint.sh
 
-RUN groupadd --system --gid 1000 appuser \
+RUN chmod +x ./scripts/entrypoint.sh \
+    && groupadd --system --gid 1000 appuser \
     && useradd --system --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 USER appuser
@@ -50,7 +52,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/health/live" || exit 1
 
-# Shell form so Railway / Heroku-style platforms can inject $PORT.
-# Local docker-compose still works because PORT defaults to 8000.
-# Tune --workers via the WORKERS env var.
-CMD uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WORKERS:-2}
+# Exec'd script bypasses sh -c quoting/buffering quirks and gives a
+# diagnostic banner before uvicorn boots. Tune --workers via WORKERS env.
+CMD ["/app/scripts/entrypoint.sh"]
