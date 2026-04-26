@@ -1,12 +1,25 @@
 #!/bin/sh
-set -e
+# Diagnostics first — write to BOTH streams in case one is being swallowed.
+log() {
+    printf '[entrypoint] %s\n' "$1"
+    printf '[entrypoint] %s\n' "$1" >&2
+}
 
-# Diagnostic banner so we can verify the container actually reached our code.
-# If logs show nothing, the platform is not capturing stdout.
-echo "[entrypoint] PORT=${PORT:-8000} WORKERS=${WORKERS:-1} APP_ENV=${APP_ENV:-?}"
-echo "[entrypoint] python: $(python --version 2>&1)"
-echo "[entrypoint] uvicorn: $(uvicorn --version 2>&1 || echo missing)"
+log "BOOT $(date -u +%FT%TZ)"
+log "PORT=${PORT:-unset} WORKERS=${WORKERS:-unset} APP_ENV=${APP_ENV:-unset}"
+log "cwd=$(pwd) user=$(id -un):$(id -gn)"
+log "python: $(python --version 2>&1)"
+log "uvicorn: $(uvicorn --version 2>&1 || echo MISSING)"
 
+log "testing app import..."
+if python -c "import src.api.main; print('[entrypoint] import ok')" 2>&1; then
+    log "import succeeded"
+else
+    log "IMPORT FAILED — see traceback above; exiting"
+    exit 1
+fi
+
+log "exec uvicorn on 0.0.0.0:${PORT:-8000} workers=${WORKERS:-1}"
 exec uvicorn src.api.main:app \
     --host 0.0.0.0 \
     --port "${PORT:-8000}" \
