@@ -17,19 +17,18 @@ Associate" and must sign a BAA. For this stack:
 
 | Vendor | Role | BAA required? | Status | Link |
 |---|---|---|---|---|
-| **Anthropic** | Receives denial letter text → returns structured extraction + generated appeal. PHI passes through. | **Yes** | TODO | https://www.anthropic.com/legal/baa (contact enterprise sales) |
-| **AWS (Textract)** | Receives denial letter PDFs / images → returns extracted text. PHI passes through. | **Yes** | TODO (covered under AWS BAA for eligible services) | https://aws.amazon.com/compliance/hipaa-compliance/ |
-| **AWS (S3)** | Backup storage — ciphertext only. Still touched by the BAA because the bucket lives in AWS. | **Yes** | TODO (same AWS BAA) | as above |
+| **Anthropic** | Receives denial letter PDFs/images and text → returns OCR'd text, structured extraction, and generated appeal. PHI passes through. | **Yes** | TODO | https://www.anthropic.com/legal/baa (contact enterprise sales) |
+| **AWS (S3)** | Backup storage — ciphertext only. Still touched by the BAA because the bucket lives in AWS. | **Yes** | TODO (AWS BAA) | https://aws.amazon.com/compliance/hipaa-compliance/ |
 | **AWS (CloudWatch Logs)** | Audit sink — may contain `user_id`, `ip_address`, `resource_id`. PHI is not logged but check your audit event shapes. | **Yes** | TODO | as above |
 | **PostgreSQL host** | Primary PHI store. Self-hosted on AWS RDS = covered by AWS BAA. Managed elsewhere = separate BAA. | **Yes** | TODO | — |
 | **Redis host** | Does NOT touch PHI (rate-limit counters + lockout IPs + session hashes). BAA not strictly required but advisable if self-hosted on a covered provider. | Situational | — | — |
 | **Monitoring stack (Prometheus / Grafana)** | No PHI in metrics (labels are scrubbed). Still review your specific setup. | Situational | — | — |
 | **Log aggregator (Datadog / Splunk / etc.)** | If you ship application logs: yes, BAA required. Audit the log shapes first. | **Yes if used** | TODO | — |
 
-**Action**: obtain and file signed BAAs with Anthropic, AWS (covers
-Textract, S3, CloudWatch, RDS), and any third-party log or observability
-provider. Record the effective date and annual review date in your GRC
-system.
+**Action**: obtain and file signed BAAs with Anthropic (covers OCR,
+extraction, generation), AWS (covers S3, CloudWatch, RDS), and any
+third-party log or observability provider. Record the effective date and
+annual review date in your GRC system.
 
 ---
 

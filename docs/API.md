@@ -69,7 +69,7 @@ Comprehensive health check for all dependencies.
     {
       "name": "ocr",
       "status": "healthy",
-      "message": "AWS Textract configured"
+      "message": "Claude OCR configured"
     }
   ]
 }

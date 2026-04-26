@@ -13,7 +13,7 @@ This file provides context for Claude Code to understand this project.
 - **Database**: PostgreSQL with SQLAlchemy async ORM
 - **Migrations**: Alembic
 - **AI**: Anthropic Claude API (claude-sonnet-4-20250514)
-- **OCR**: AWS Textract (with mock provider for testing)
+- **OCR**: Claude document/image content blocks (mock provider when no API key)
 - **Caching**: Redis (optional)
 - **Auth**: JWT tokens + API keys
 
@@ -51,7 +51,7 @@ prior-auth-assistant/
 │   │   └── middleware.py    # Rate limiting, security headers
 │   ├── integrations/
 │   │   ├── llm.py           # Anthropic Claude client (async)
-│   │   └── ocr.py           # AWS Textract + mock provider
+│   │   └── ocr.py           # Claude document/image OCR + mock provider
 │   └── templates/
 │       └── appeal_templates.py  # 8 denial-type specific templates
 ├── frontend/                 # React frontend
@@ -175,7 +175,7 @@ Two methods supported:
 ## Appeal Generation Pipeline
 
 1. **Input**: Document upload or text paste
-2. **OCR** (if document): AWS Textract extracts text
+2. **OCR** (if document): Claude extracts text via document/image content blocks
 3. **Extraction**: Claude extracts structured denial info (payer, reason, codes, deadline)
 4. **Template Selection**: Choose template based on denial reason
 5. **Enhancement**: Claude enhances draft with clinical language
