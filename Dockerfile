@@ -39,7 +39,10 @@ COPY --from=build /install /usr/local
 COPY src/ ./src/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./alembic.ini
-COPY scripts/entrypoint.sh ./scripts/entrypoint.sh
+# Whole scripts dir so `python -m scripts.migrate` and `scripts.seed_demo`
+# resolve at runtime (Railway preDeployCommand and post-deploy seeding both
+# need this).
+COPY scripts/ ./scripts/
 
 RUN chmod +x ./scripts/entrypoint.sh \
     && groupadd --system --gid 1000 appuser \
