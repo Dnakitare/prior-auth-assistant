@@ -1,7 +1,8 @@
 """File upload content validation.
 
 Client-declared Content-Type is not trusted. Instead, we sniff the first bytes
-of the file and match against the magic numbers for PDF, PNG, JPEG, and TIFF.
+of the file and match against magic numbers for PDF, PNG, and JPEG — the
+formats Claude's document/image content blocks accept directly.
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ _SIGNATURES: list[tuple[bytes, DetectedType]] = [
     (b"%PDF-", DetectedType("application/pdf", "pdf")),
     (b"\x89PNG\r\n\x1a\n", DetectedType("image/png", "png")),
     (b"\xff\xd8\xff", DetectedType("image/jpeg", "jpg")),
-    (b"II*\x00", DetectedType("image/tiff", "tif")),  # little-endian
-    (b"MM\x00*", DetectedType("image/tiff", "tif")),  # big-endian
 ]
 
 
@@ -35,7 +34,7 @@ def detect_type(data: bytes) -> DetectedType:
         if head.startswith(signature):
             return detected
     raise UnsupportedFileType(
-        "File content does not match supported types (PDF, PNG, JPEG, TIFF)."
+        "File content does not match supported types (PDF, PNG, JPEG)."
     )
 
 

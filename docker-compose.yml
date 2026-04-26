@@ -44,9 +44,6 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - RATE_LIMIT_BACKEND=memory
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - AWS_REGION=${AWS_REGION:-us-east-1}
       - APP_ENV=development
       - DEBUG=true
       # Dev-only: generate once and paste, or let settings mint ephemerals.

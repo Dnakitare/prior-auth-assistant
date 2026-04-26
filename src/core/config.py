@@ -66,12 +66,14 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="claude-sonnet-4-20250514")
     llm_max_tokens_extraction: int = Field(default=1024, ge=64)
     llm_max_tokens_generation: int = Field(default=2500, ge=256)
+    # Verbatim OCR responses can be longer than structured extraction.
+    llm_max_tokens_ocr: int = Field(default=4096, ge=256)
     # Cap on total input characters passed to the model per request, before delimiters.
     llm_max_input_chars: int = Field(default=50000, ge=1000)
 
-    # AWS (Textract OCR)
-    aws_access_key_id: str = Field(default="")
-    aws_secret_access_key: str = Field(default="")
+    # AWS region — used only by the optional CloudWatch audit sink. Leave
+    # blank to disable boto3 entirely. Textract was previously used for OCR
+    # but has been replaced by Claude's document content blocks.
     aws_region: str = Field(default="us-east-1")
 
     # Database

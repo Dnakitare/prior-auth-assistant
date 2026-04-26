@@ -152,18 +152,23 @@ async def check_llm() -> ComponentHealth:
 
 
 async def check_ocr() -> ComponentHealth:
-    """Check OCR service availability."""
-    if settings.aws_access_key_id and settings.aws_secret_access_key:
+    """Check OCR provider availability.
+
+    OCR runs through Claude (same vendor as extraction/generation), so a
+    configured ANTHROPIC_API_KEY means OCR is wired up. No key falls back
+    to the mock provider.
+    """
+    if settings.anthropic_api_key:
         return ComponentHealth(
             name="ocr",
             status=HealthStatus.HEALTHY,
-            message="AWS Textract configured",
+            message="Claude OCR configured",
         )
 
     return ComponentHealth(
         name="ocr",
         status=HealthStatus.DEGRADED,
-        message="Using mock OCR provider (AWS not configured)",
+        message="Using mock OCR provider (no Anthropic key configured)",
     )
 
 

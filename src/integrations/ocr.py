@@ -1,9 +1,24 @@
-"""OCR integration for document processing."""
+"""OCR integration for document processing.
 
+Claude reads PDFs and images directly via document/image content blocks, so the
+full pipeline is OCR → extraction → enhancement against a single vendor. The
+mock provider returns a deterministic synthetic denial letter for offline
+development.
+"""
+
+from __future__ import annotations
+
+import base64
 from abc import ABC, abstractmethod
 
+import anthropic
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from src.core.config import settings
 
@@ -13,7 +28,26 @@ logger = structlog.get_logger()
 class OCRError(Exception):
     """Raised when OCR extraction fails."""
 
-    pass
+
+# Claude accepts these image media types directly. PDFs go through the
+# document content block; everything else needs upstream conversion.
+_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_PDF_MEDIA_TYPE = "application/pdf"
+
+
+def _detect_media_type(document_bytes: bytes) -> str:
+    head = document_bytes[:16]
+    if head.startswith(b"%PDF-"):
+        return _PDF_MEDIA_TYPE
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"GIF8"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    raise OCRError("Unsupported document format for OCR (need PDF, PNG, JPEG, GIF, or WebP)")
 
 
 class OCRProvider(ABC):
@@ -22,61 +56,82 @@ class OCRProvider(ABC):
     @abstractmethod
     async def extract_text(self, document_bytes: bytes) -> str:
         """Extract text from a document."""
-        pass
 
 
-class AWSTextractProvider(OCRProvider):
-    """AWS Textract OCR provider."""
+class ClaudeOCRProvider(OCRProvider):
+    """OCR via Claude's document/image content blocks.
+
+    One vendor for OCR + extraction + enhancement keeps the pipeline simple
+    and removes the second BAA scope item that AWS Textract used to add.
+    """
+
+    _OCR_INSTRUCTION = (
+        "Extract every line of text from this document verbatim. "
+        "Preserve line breaks. Do not summarize, paraphrase, or comment. "
+        "Return only the extracted text."
+    )
 
     def __init__(self) -> None:
-        import boto3
-
-        self.client = boto3.client(
-            "textract",
-            region_name=settings.aws_region,
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-        )
+        if not settings.anthropic_api_key:
+            raise OCRError("ANTHROPIC_API_KEY is not configured for ClaudeOCRProvider")
+        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.model = settings.llm_model
 
     @retry(
+        retry=retry_if_exception_type(
+            (anthropic.RateLimitError, anthropic.APIConnectionError)
+        ),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
     )
     async def extract_text(self, document_bytes: bytes) -> str:
-        """Extract text from a document using AWS Textract."""
         log = logger.bind(doc_size=len(document_bytes))
-        log.info("Starting Textract extraction")
+        log.info("Starting Claude OCR extraction")
+
+        media_type = _detect_media_type(document_bytes)
+        b64 = base64.b64encode(document_bytes).decode("ascii")
+
+        if media_type == _PDF_MEDIA_TYPE:
+            doc_block = {
+                "type": "document",
+                "source": {"type": "base64", "media_type": media_type, "data": b64},
+            }
+        else:
+            doc_block = {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": b64},
+            }
 
         try:
-            response = self.client.detect_document_text(
-                Document={"Bytes": document_bytes}
+            message = await self.client.messages.create(
+                model=self.model,
+                max_tokens=settings.llm_max_tokens_ocr,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [doc_block, {"type": "text", "text": self._OCR_INSTRUCTION}],
+                    }
+                ],
             )
-        except Exception as e:
-            log.error("Textract extraction failed", error=str(e))
-            raise OCRError(f"Failed to extract text: {str(e)}") from e
+        except anthropic.APIStatusError as e:
+            log.error("Claude OCR failed", status_code=e.status_code, error=str(e))
+            raise OCRError(f"Claude OCR API error: {e.status_code}") from e
 
-        extracted_lines = []
-        for block in response.get("Blocks", []):
-            if block["BlockType"] == "LINE":
-                extracted_lines.append(block["Text"])
+        text = "".join(
+            block.text for block in message.content if getattr(block, "type", None) == "text"
+        ).strip()
 
-        text = "\n".join(extracted_lines)
-        log.info("Extraction complete", line_count=len(extracted_lines))
-
-        if not text.strip():
+        log.info("OCR complete", char_count=len(text))
+        if not text:
             raise OCRError("No text extracted from document")
-
         return text
 
 
 class MockOCRProvider(OCRProvider):
-    """Mock OCR provider for testing without AWS credentials."""
+    """Mock OCR provider for testing without API access."""
 
     async def extract_text(self, document_bytes: bytes) -> str:
-        """Return mock denial letter text for testing."""
         logger.info("Using mock OCR provider")
-
-        # Return a sample denial letter for testing
         return """
 INSURANCE COMPANY NAME: Blue Cross Blue Shield
 CLAIMS DEPARTMENT
@@ -128,10 +183,12 @@ Blue Cross Blue Shield
 
 
 def get_ocr_provider() -> OCRProvider:
-    """Factory function to get the configured OCR provider."""
-    # Use mock provider if AWS credentials are not configured
-    if not settings.aws_access_key_id or not settings.aws_secret_access_key:
-        logger.warning("AWS credentials not configured, using mock OCR provider")
-        return MockOCRProvider()
+    """Return the configured OCR provider.
 
-    return AWSTextractProvider()
+    Falls back to the mock when no Anthropic API key is configured (local
+    development without credentials).
+    """
+    if not settings.anthropic_api_key:
+        logger.warning("ANTHROPIC_API_KEY not configured, using mock OCR provider")
+        return MockOCRProvider()
+    return ClaudeOCRProvider()

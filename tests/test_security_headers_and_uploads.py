@@ -44,11 +44,15 @@ class TestUploadMagicBytes:
         detected = detect_type(b"\xff\xd8\xffrest")
         assert detected.mime == "image/jpeg"
 
-    def test_tiff_le_detected(self):
-        assert detect_type(b"II*\x00rest").mime == "image/tiff"
-
-    def test_tiff_be_detected(self):
-        assert detect_type(b"MM\x00*rest").mime == "image/tiff"
+    def test_tiff_rejected(self):
+        # TIFF was supported under Textract but Claude's content blocks don't
+        # accept it. Treat it the same as any unknown format.
+        from src.core.upload_validation import UnsupportedFileType
+        import pytest as _pytest
+        with _pytest.raises(UnsupportedFileType):
+            detect_type(b"II*\x00rest")
+        with _pytest.raises(UnsupportedFileType):
+            detect_type(b"MM\x00*rest")
 
     def test_unknown_rejected(self):
         with pytest.raises(UnsupportedFileType):

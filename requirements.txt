@@ -7,10 +7,13 @@ uvicorn[standard]>=0.27.0,<0.35.0
 python-multipart>=0.0.6,<0.1.0
 starlette>=0.36.0,<0.48.0
 
-# AI/ML (>=0.40 enables system cache_control for prompt caching)
+# AI/ML (>=0.40 enables system cache_control for prompt caching;
+# document/image content blocks power the Claude OCR provider).
 anthropic>=0.40.0,<1.0.0
 
-# AWS (for Textract OCR)
+# AWS — optional, only needed for the CloudWatch audit sink
+# (set AUDIT_SINK_CLOUDWATCH_GROUP). Textract was removed in favor of
+# Claude's document content blocks.
 boto3>=1.34.0,<2.0.0
 
 # Database
