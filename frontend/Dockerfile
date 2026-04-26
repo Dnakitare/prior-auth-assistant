@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 # Frontend production image. Two stages: vite build → nginx serve.
 # Designed to deploy on Railway / any platform that injects $PORT.
 
