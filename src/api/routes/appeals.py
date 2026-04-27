@@ -26,8 +26,11 @@ from src.integrations.llm import (
     LLMInputTooLarge,
     LLMRateLimitError,
     get_llm_client,
+    make_byok_llm_client,
 )
-from src.integrations.ocr import OCRError, get_ocr_provider
+from src.integrations.ocr import OCRError, get_ocr_provider, make_byok_ocr_provider
+
+BYOK_HEADER = "X-User-Anthropic-Key"
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -78,10 +81,50 @@ class ErrorResponse(BaseModel):
 
 
 def get_appeal_service() -> AppealGenerationService:
+    """Default service using the platform Anthropic key."""
     return AppealGenerationService(
         ocr_provider=get_ocr_provider(),
         llm_client=get_llm_client(),
     )
+
+
+def _extract_byok_key(request: Request) -> str | None:
+    """Read the BYOK header. Returns the key or None.
+
+    Minimal validation only — we don't attempt to authenticate the key at
+    this layer; Anthropic will reject it if it's wrong, and our error
+    handler converts that into a 502/503 the user can act on.
+    """
+    raw = request.headers.get(BYOK_HEADER, "").strip()
+    if not raw:
+        return None
+    if not raw.startswith("sk-ant-") or len(raw) < 30:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{BYOK_HEADER} header is not a valid Anthropic API key",
+        )
+    return raw
+
+
+def appeal_service_for_request(request: Request) -> tuple[AppealGenerationService, bool]:
+    """Build an AppealGenerationService for this request.
+
+    If the request carries a BYOK header, the LLM and OCR clients are
+    constructed fresh from that key (NOT cached, NOT logged). Otherwise the
+    default singleton chain is returned.
+
+    Returns the service plus a `byok_used` flag for the audit row.
+    """
+    byok_key = _extract_byok_key(request)
+    if byok_key:
+        return (
+            AppealGenerationService(
+                ocr_provider=make_byok_ocr_provider(byok_key),
+                llm_client=make_byok_llm_client(byok_key),
+            ),
+            True,
+        )
+    return get_appeal_service(), False
 
 
 def _audit_context(request: Request) -> dict:
@@ -208,8 +251,13 @@ async def generate_appeal_from_document(
         treating_physician=treating_physician,
     )
 
-    await _reserve_llm_budget(db, org_id)
-    service = get_appeal_service()
+    service, byok_used = appeal_service_for_request(request)
+    if not byok_used:
+        # Only debit the platform's per-org budget when the platform key
+        # is being used. BYOK requests bill the visitor's own account.
+        await _reserve_llm_budget(db, org_id)
+    log = log.bind(byok_used=byok_used)
+    ctx["byok_used"] = byok_used
     try:
         appeal = await service.process_denial(content, patient_context)
     except OCRError as e:
@@ -292,8 +340,11 @@ async def generate_appeal_from_text(
         treating_physician=appeal_request.treating_physician,
     )
 
-    await _reserve_llm_budget(db, org_id)
-    service = get_appeal_service()
+    service, byok_used = appeal_service_for_request(request)
+    if not byok_used:
+        await _reserve_llm_budget(db, org_id)
+    log = log.bind(byok_used=byok_used)
+    ctx["byok_used"] = byok_used
     try:
         appeal = await service.process_denial_from_text(
             appeal_request.denial_text, patient_context

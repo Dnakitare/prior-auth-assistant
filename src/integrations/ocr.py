@@ -71,10 +71,11 @@ class ClaudeOCRProvider(OCRProvider):
         "Return only the extracted text."
     )
 
-    def __init__(self) -> None:
-        if not settings.anthropic_api_key:
+    def __init__(self, api_key: str | None = None) -> None:
+        key = (api_key or settings.anthropic_api_key or "").strip()
+        if not key:
             raise OCRError("ANTHROPIC_API_KEY is not configured for ClaudeOCRProvider")
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.client = anthropic.AsyncAnthropic(api_key=key)
         self.model = settings.llm_model
 
     @retry(
@@ -183,7 +184,7 @@ Blue Cross Blue Shield
 
 
 def get_ocr_provider() -> OCRProvider:
-    """Return the configured OCR provider.
+    """Default OCR provider, keyed off settings.anthropic_api_key.
 
     Falls back to the mock when no Anthropic API key is configured (local
     development without credentials).
@@ -192,3 +193,8 @@ def get_ocr_provider() -> OCRProvider:
         logger.warning("ANTHROPIC_API_KEY not configured, using mock OCR provider")
         return MockOCRProvider()
     return ClaudeOCRProvider()
+
+
+def make_byok_ocr_provider(api_key: str) -> OCRProvider:
+    """One-shot OCR provider for a per-request BYOK key. Not cached."""
+    return ClaudeOCRProvider(api_key=api_key)

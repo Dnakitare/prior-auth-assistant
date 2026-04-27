@@ -117,12 +117,17 @@ Writing rules:
 
 
 class LLMClient:
-    """Async client for Anthropic Claude."""
+    """Async client for Anthropic Claude.
 
-    def __init__(self) -> None:
-        if not settings.anthropic_api_key:
+    Accepts an optional `api_key` override so per-request BYOK callers can
+    construct a one-shot client without polluting the cached singleton.
+    """
+
+    def __init__(self, api_key: str | None = None) -> None:
+        key = (api_key or settings.anthropic_api_key or "").strip()
+        if not key:
             raise LLMError("ANTHROPIC_API_KEY is not configured")
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.client = anthropic.AsyncAnthropic(api_key=key)
         self.model = settings.llm_model
 
     @retry(
@@ -434,7 +439,16 @@ _llm_client: LLMClient | None = None
 
 
 def get_llm_client() -> LLMClient:
+    """Default singleton, served from settings.anthropic_api_key."""
     global _llm_client
     if _llm_client is None:
         _llm_client = LLMClient()
     return _llm_client
+
+
+def make_byok_llm_client(api_key: str) -> LLMClient:
+    """Construct a one-shot client using a user-supplied API key. The result
+    is intentionally NOT cached — the key lives only in the client instance
+    and dies when the request handler returns. The key MUST NOT be logged.
+    """
+    return LLMClient(api_key=api_key)

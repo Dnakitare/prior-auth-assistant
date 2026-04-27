@@ -3,6 +3,7 @@ import { FileUpload } from './components/FileUpload';
 import { PatientContextForm, PatientContext } from './components/PatientContextForm';
 import { AppealPreview } from './components/AppealPreview';
 import { TextInputMode } from './components/TextInputMode';
+import { BYOKSettings } from './components/BYOKSettings';
 import {
   generateAppealFromDocument,
   generateAppealFromText,
@@ -165,13 +166,18 @@ function App() {
       {demoBanner}
       <div className="max-w-3xl mx-auto px-4 py-8">
         {/* Header */}
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            Prior Authorization Assistant
-          </h1>
-          <p className="text-gray-600">
-            Upload a denial letter or paste the text to generate an appeal
-          </p>
+        <div className="flex items-start justify-between mb-8">
+          <div className="flex-1 text-center">
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">
+              Prior Authorization Assistant
+            </h1>
+            <p className="text-gray-600">
+              Upload a denial letter or paste the text to generate an appeal
+            </p>
+          </div>
+          <div className="flex-shrink-0 ml-4 mt-1">
+            <BYOKSettings />
+          </div>
         </div>
 
         {/* Input Mode Toggle */}

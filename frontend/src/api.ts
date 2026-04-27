@@ -58,6 +58,35 @@ export function setApiKey(key: string | null): void {
   apiKey = key;
 }
 
+// --- BYOK (Bring Your Own Key) ---------------------------------------------
+//
+// The visitor may supply their own Anthropic key for this session so they
+// don't share the demo's budget. The key lives in sessionStorage (cleared
+// on tab close) and is sent on every request as X-User-Anthropic-Key. It
+// is NEVER persisted to localStorage and the backend never logs the value.
+
+const BYOK_STORAGE_KEY = 'pa_byok_anthropic_key';
+
+export function getByokKey(): string | null {
+  try {
+    return sessionStorage.getItem(BYOK_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setByokKey(key: string | null): void {
+  try {
+    if (key) {
+      sessionStorage.setItem(BYOK_STORAGE_KEY, key);
+    } else {
+      sessionStorage.removeItem(BYOK_STORAGE_KEY);
+    }
+  } catch {
+    /* sessionStorage disabled — silently ignore */
+  }
+}
+
 // Create axios instance
 const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
@@ -78,6 +107,12 @@ api.interceptors.request.use(
     // Add JWT token if available
     if (authToken) {
       config.headers['Authorization'] = `Bearer ${authToken}`;
+    }
+
+    // BYOK: forward the visitor's own Anthropic key when set.
+    const byok = getByokKey();
+    if (byok) {
+      config.headers['X-User-Anthropic-Key'] = byok;
     }
 
     // Add request ID for tracing
