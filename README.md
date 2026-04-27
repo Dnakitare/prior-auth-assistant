@@ -78,6 +78,14 @@ curl -X POST $API_URL/api/v1/appeals/text \
 The frontend has a "Try a sample" picker in **Paste Text** mode that loads
 one of the synthetic denials with a click.
 
+**BYOK (bring your own key).** The header has a "Use my Anthropic key"
+pill — paste an `sk-ant-…` key and the demo runs on your credits instead
+of the shared budget. The key is stored in `sessionStorage` only (cleared
+on tab close), never written to disk, and never logged server-side. Audit
+rows tag BYOK-served requests so the trail stays unambiguous. **This path
+is portfolio-only**; see [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md#byok-bring-your-own-key--portfolio-only)
+for why it would be removed in a real healthcare deployment.
+
 ---
 
 ## Architecture

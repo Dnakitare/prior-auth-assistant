@@ -116,6 +116,30 @@ required; the others are often included:
 
 ---
 
+## BYOK (bring your own key) — portfolio only
+
+The deployed demo accepts an `X-User-Anthropic-Key` header so visitors can
+run the pipeline on their own Anthropic credits. **This MUST be removed
+before serving real PHI** for the following reasons:
+
+- **Vendor accountability is fractured.** The platform's BAA with
+  Anthropic covers requests authenticated with the platform's key. Requests
+  authenticated with a visitor-supplied key route PHI through a vendor
+  relationship the platform doesn't control or have a BAA on.
+- **Audit-trail integrity.** `byok_used` is recorded in the audit row,
+  but the actual API-side telemetry (request IDs, token usage, abuse
+  signals) lives in the visitor's Anthropic account, not the platform's.
+  Incident response can't reach it.
+- **Key handling.** sessionStorage on a multi-tenant healthcare app is
+  insufficient — keys can leak via XSS, browser extensions, shared
+  workstations. The portfolio demo accepts that risk because the data
+  is synthetic.
+
+For production, remove the BYOK code path entirely and route all calls
+through the platform's BAA-covered Anthropic key.
+
+---
+
 ## Breach notification
 
 See `docs/RUNBOOK.md` section 5. The technical playbook is there; the
