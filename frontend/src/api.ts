@@ -32,6 +32,13 @@ export class RateLimitError extends ApiError {
   }
 }
 
+export class BudgetExhaustedError extends ApiError {
+  constructor(message: string) {
+    super(message, 503, 'BUDGET_EXHAUSTED');
+    this.name = 'BudgetExhaustedError';
+  }
+}
+
 export class ValidationError extends ApiError {
   constructor(message: string, public details?: Record<string, string[]>) {
     super(message, 400, 'VALIDATION_ERROR');
@@ -108,12 +115,19 @@ api.interceptors.response.use(
       case 400:
       case 422:
         throw new ValidationError(message);
-      case 503:
+      case 503: {
+        // Backend signals budget cap via X-Error-Code header so the frontend
+        // can offer the BYOK path instead of a generic "try again later".
+        const errorCode = headers['x-error-code'] || data?.error_code;
+        if (errorCode === 'BUDGET_EXHAUSTED') {
+          throw new BudgetExhaustedError(message);
+        }
         throw new ApiError(
           'Service temporarily unavailable. Please try again later.',
           503,
           'SERVICE_UNAVAILABLE'
         );
+      }
       default:
         throw new ApiError(message, status, data?.error_code);
     }

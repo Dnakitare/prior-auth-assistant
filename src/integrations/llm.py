@@ -40,11 +40,42 @@ class LLMError(Exception):
 
 
 class LLMRateLimitError(LLMError):
-    """Rate limited by the LLM API."""
+    """Rate limited by the LLM API. Retryable after a cooldown window."""
+
+    def __init__(self, message: str, retry_after_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class LLMBudgetExceeded(LLMError):
+    """The configured budget cap on the API key has been hit. Not retryable
+    until the operator raises the cap or the next billing cycle. Distinct
+    from RateLimit so the API can serve a clearer error to clients."""
 
 
 class LLMInputTooLarge(LLMError):
     """Input exceeds configured budget."""
+
+
+def _translate_anthropic_rate_limit(exc: "anthropic.RateLimitError") -> LLMError:
+    """Anthropic returns 429 for both per-minute rate limits AND hard budget
+    caps (workspace spend limit). The error text is the only signal — if it
+    mentions billing/credit/spend, treat it as budget-exhausted; otherwise
+    treat as transient rate limit."""
+    raw = str(exc).lower()
+    if any(t in raw for t in ("credit_balance", "credit balance", "billing", "spend limit", "budget")):
+        return LLMBudgetExceeded(
+            "LLM budget cap reached. The demo's monthly token budget has been hit; "
+            "try again later, or use the BYOK option to supply your own Anthropic key."
+        )
+
+    retry_after: int | None = None
+    response = getattr(exc, "response", None)
+    if response is not None:
+        header = response.headers.get("retry-after") if hasattr(response, "headers") else None
+        if header and header.isdigit():
+            retry_after = int(header)
+    return LLMRateLimitError("LLM rate limit reached", retry_after_seconds=retry_after)
 
 
 # --- Prompts ---------------------------------------------------------------
@@ -164,9 +195,9 @@ class LLMClient:
                     max_tokens=settings.llm_max_tokens_extraction,
                 )
                 llm_calls_total.labels(operation="extract", outcome="ok").inc()
-            except anthropic.RateLimitError:
+            except anthropic.RateLimitError as exc:
                 llm_calls_total.labels(operation="extract", outcome="rate_limit").inc()
-                raise
+                raise _translate_anthropic_rate_limit(exc) from exc
             except Exception:
                 llm_calls_total.labels(operation="extract", outcome="error").inc()
                 raise
@@ -241,9 +272,9 @@ class LLMClient:
                     max_tokens=settings.llm_max_tokens_generation,
                 )
                 llm_calls_total.labels(operation="generate", outcome="ok").inc()
-            except anthropic.RateLimitError:
+            except anthropic.RateLimitError as exc:
                 llm_calls_total.labels(operation="generate", outcome="rate_limit").inc()
-                raise
+                raise _translate_anthropic_rate_limit(exc) from exc
             except Exception:
                 llm_calls_total.labels(operation="generate", outcome="error").inc()
                 raise

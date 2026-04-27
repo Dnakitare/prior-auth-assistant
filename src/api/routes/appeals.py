@@ -20,7 +20,13 @@ from src.core.security import AuthenticatedUser, get_current_user
 from src.core.upload_validation import UnsupportedFileType, detect_type, safe_filename
 from src.core.services import AppealGenerationService
 from src.core.webhooks import emit_appeal_event
-from src.integrations.llm import LLMError, LLMInputTooLarge, get_llm_client
+from src.integrations.llm import (
+    LLMBudgetExceeded,
+    LLMError,
+    LLMInputTooLarge,
+    LLMRateLimitError,
+    get_llm_client,
+)
 from src.integrations.ocr import OCRError, get_ocr_provider
 
 router = APIRouter()
@@ -216,6 +222,23 @@ async def generate_appeal_from_document(
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)
         )
+    except LLMRateLimitError as e:
+        log.warning("llm_rate_limit", retry_after=e.retry_after_seconds)
+        headers = (
+            {"Retry-After": str(e.retry_after_seconds)} if e.retry_after_seconds else {}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="The AI service is rate-limiting requests right now. Wait a moment and try again.",
+            headers=headers,
+        )
+    except LLMBudgetExceeded as e:
+        log.warning("llm_budget_exceeded", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+            headers={"X-Error-Code": "BUDGET_EXHAUSTED"},
+        )
     except LLMError as e:
         log.error("llm_failed", error=str(e))
         raise HTTPException(
@@ -278,6 +301,23 @@ async def generate_appeal_from_text(
     except LLMInputTooLarge as e:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)
+        )
+    except LLMRateLimitError as e:
+        log.warning("llm_rate_limit", retry_after=e.retry_after_seconds)
+        headers = (
+            {"Retry-After": str(e.retry_after_seconds)} if e.retry_after_seconds else {}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="The AI service is rate-limiting requests right now. Wait a moment and try again.",
+            headers=headers,
+        )
+    except LLMBudgetExceeded as e:
+        log.warning("llm_budget_exceeded", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+            headers={"X-Error-Code": "BUDGET_EXHAUSTED"},
         )
     except LLMError as e:
         log.error("llm_failed", error=str(e))

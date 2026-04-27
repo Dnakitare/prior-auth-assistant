@@ -8,6 +8,7 @@ import {
   generateAppealFromText,
   ApiError,
   AuthenticationError,
+  BudgetExhaustedError,
   RateLimitError,
   ValidationError,
 } from './api';
@@ -17,7 +18,7 @@ type InputMode = 'upload' | 'text';
 
 interface ErrorState {
   message: string;
-  type: 'error' | 'warning' | 'auth' | 'rate_limit';
+  type: 'error' | 'warning' | 'auth' | 'rate_limit' | 'budget_exhausted';
   retryAfter?: number;
 }
 
@@ -40,6 +41,11 @@ function App() {
         message: err.message,
         type: 'rate_limit',
         retryAfter: err.retryAfter,
+      });
+    } else if (err instanceof BudgetExhaustedError) {
+      setError({
+        message: err.message,
+        type: 'budget_exhausted',
       });
     } else if (err instanceof ValidationError) {
       setError({
@@ -206,6 +212,8 @@ function App() {
                 ? 'bg-purple-50 border-purple-200 text-purple-700'
                 : error.type === 'rate_limit'
                 ? 'bg-orange-50 border-orange-200 text-orange-700'
+                : error.type === 'budget_exhausted'
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
                 : error.type === 'warning'
                 ? 'bg-yellow-50 border-yellow-200 text-yellow-700'
                 : 'bg-red-50 border-red-200 text-red-700'
@@ -230,12 +238,24 @@ function App() {
                 </svg>
               )}
               <div className="flex-1">
-                <p className="font-medium">{error.message}</p>
+                <p className="font-medium">
+                  {error.type === 'budget_exhausted' ? "Demo's LLM budget exhausted" : error.message}
+                </p>
                 {error.type === 'rate_limit' && error.retryAfter && (
                   <p className="text-sm mt-1">Please try again in {error.retryAfter} seconds.</p>
                 )}
+                {error.type === 'rate_limit' && !error.retryAfter && (
+                  <p className="text-sm mt-1">Please wait a few seconds and try again.</p>
+                )}
                 {error.type === 'auth' && (
                   <p className="text-sm mt-1">Contact your administrator to obtain API credentials.</p>
+                )}
+                {error.type === 'budget_exhausted' && (
+                  <p className="text-sm mt-1">
+                    The shared Anthropic budget for this public demo has been hit for the
+                    period. Try again later, or supply your own Anthropic API key in the
+                    settings menu (BYOK) to keep using the demo on your own credits.
+                  </p>
                 )}
               </div>
               <button
