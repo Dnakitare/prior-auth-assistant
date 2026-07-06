@@ -332,21 +332,24 @@ class LLMClient:
         appeal_deadline = _parse_date(data.get("appeal_deadline"))
 
         # Post-validate that extracted codes actually appear in the source.
-        # Hallucinated codes are dropped rather than silently stored.
+        # Hallucinated codes are dropped rather than silently stored. The
+        # match requires token boundaries — a bare substring test let short
+        # codes ride along inside unrelated numbers ("99213" matching
+        # "199213X").
         raw_lower = raw_text.lower()
         procedure_codes = [
             c for c in (data.get("procedure_codes") or [])
-            if isinstance(c, str) and c.lower() in raw_lower
+            if isinstance(c, str) and _appears_in_source(c, raw_lower)
         ]
         diagnosis_codes = [
             c for c in (data.get("diagnosis_codes") or [])
-            if isinstance(c, str) and c.lower() in raw_lower
+            if isinstance(c, str) and _appears_in_source(c, raw_lower)
         ]
         member_id = data.get("member_id")
-        if isinstance(member_id, str) and member_id.lower() not in raw_lower:
+        if isinstance(member_id, str) and not _appears_in_source(member_id, raw_lower):
             member_id = None
         claim_number = data.get("claim_number")
-        if isinstance(claim_number, str) and claim_number.lower() not in raw_lower:
+        if isinstance(claim_number, str) and not _appears_in_source(claim_number, raw_lower):
             claim_number = None
 
         return DenialExtraction(
@@ -377,7 +380,9 @@ class LLMClient:
         should see.
         """
         if denial.member_id and denial.member_id not in response:
-            log.warning("appeal_lost_member_id", member_id_prefix=denial.member_id[:3])
+            # No identifier fragments in the log stream — logs are outside
+            # the field-encryption boundary.
+            log.warning("appeal_lost_member_id")
         if denial.claim_number and denial.claim_number not in response:
             log.warning("appeal_lost_claim_number")
         if patient_context and patient_context.patient_name and patient_context.patient_name != "Unknown":
@@ -423,6 +428,21 @@ class LLMClient:
             return template.format(**values)
         except KeyError:
             return TEMPLATES["default"].format(**values)
+
+
+def _appears_in_source(value: str, raw_lower: str) -> bool:
+    """True if `value` occurs in the source text at token boundaries.
+
+    Boundary = not butted against another alphanumeric, so "99213" doesn't
+    match inside "199213X" but still matches "CPT:99213." and line starts/ends.
+    """
+    return (
+        re.search(
+            rf"(?<![0-9A-Za-z]){re.escape(value.lower())}(?![0-9A-Za-z])",
+            raw_lower,
+        )
+        is not None
+    )
 
 
 def _parse_date(value) -> datetime | None:

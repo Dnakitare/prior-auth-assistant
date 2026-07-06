@@ -51,34 +51,25 @@ os.environ.setdefault("RATE_LIMIT_BACKEND", "memory")
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 from src.api.main import app  # noqa: E402
-from src.core import database as _database_module  # noqa: E402
 from src.core.database import Base, async_session_maker as _original_session_maker, engine  # noqa: E402
 
 
-# Test-only RLS setup: rather than wrap the session maker (which loses
-# set_config's session-scope across commit boundaries in some SQLAlchemy
-# paths), register a sync event listener that runs on every new
-# connection. Every test connection therefore starts with app.is_admin
-# set to 'true' — tests that specifically want tenant scoping (test_rls.py)
-# override it by calling set_rls_context explicitly mid-test.
-#
-# Safe because tests use NullPool: every session gets a fresh connection
-# that triggers this listener. No cross-test leakage; each test is
-# effectively an admin session.
-from sqlalchemy import event
-
-@event.listens_for(_database_module.engine.sync_engine, "connect")
-def _set_test_admin_gucs(dbapi_conn, connection_record):
-    if _USING_POSTGRES:
-        cursor = dbapi_conn.cursor()
-        try:
-            cursor.execute("SET app.is_admin = 'true'")
-            cursor.execute("SET app.org_id = ''")
-        finally:
-            cursor.close()
+# NOTE (migration 006): there is intentionally NO test hook that grants the
+# runtime connections an admin RLS context. The old conftest set
+# `app.is_admin='true'` on every connection, which (a) relied on the
+# GUC-based policy bypass that migration 006 removed precisely because any
+# client could set it, and (b) meant the Postgres CI job never exercised
+# tenant-scoped RLS on the real request path. Cross-tenant test plumbing
+# (seeding, truncation) now goes through the admin engine — in the Postgres
+# CI job DATABASE_ADMIN_URL points at the superuser role, mirroring the
+# production two-role topology.
+from src.core.database import (  # noqa: E402
+    admin_engine,
+    async_admin_session_maker,
+)
 
 # Keep the alias so existing tests that import async_session_maker still
-# work — no wrapper now, it's just the original maker.
+# work — it's just the original maker.
 async_session_maker = _original_session_maker
 from src.core.db_models import (  # noqa: E402,F401
     ApiKeyRecord,
@@ -120,9 +111,10 @@ async def _init_schema():
 
     if _USING_POSTGRES:
         # Wipe any state left by a prior run so tests are deterministic.
+        # Admin engine: TRUNCATE needs to reach every org's rows.
         from sqlalchemy import text
 
-        async with engine.begin() as conn:
+        async with admin_engine.begin() as conn:
             for table in [
                 "webhook_deliveries",
                 "webhook_endpoints",
@@ -139,8 +131,9 @@ async def _init_schema():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    async with async_session_maker() as db:
-        # Seed with the admin context active so RLS (if enabled) allows the write.
+    async with async_admin_session_maker() as db:
+        # Seed via the admin engine — its role bypasses RLS by role attribute,
+        # so cross-org writes work without any GUC games.
         await set_rls_context(db, org_id=None, is_admin=True, source="test", scope="session")
         db.add(
             ApiKeyRecord(

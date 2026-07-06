@@ -18,7 +18,11 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
-from src.core.database import async_session_maker
+# Direct DB inspection in tests uses the ADMIN session maker: since
+# migration 006 the runtime role has no RLS bypass, so an org-less
+# session would see zero rows on the Postgres CI job. (On SQLite the
+# two makers are the same object.)
+from src.core.database import async_admin_session_maker as async_session_maker
 from src.core.db_models import (
     AppealRecord,
     OrgQuotaRecord,

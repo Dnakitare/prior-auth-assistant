@@ -63,9 +63,12 @@ class Settings(BaseSettings):
 
     # LLM / AI
     anthropic_api_key: str = Field(default="")
-    llm_model: str = Field(default="claude-sonnet-4-20250514")
+    # claude-sonnet-5 is the current Sonnet (the old claude-sonnet-4-20250514
+    # default is deprecated upstream). Note Sonnet 5's tokenizer counts ~30%
+    # more tokens for the same text, hence the generation headroom below.
+    llm_model: str = Field(default="claude-sonnet-5")
     llm_max_tokens_extraction: int = Field(default=1024, ge=64)
-    llm_max_tokens_generation: int = Field(default=2500, ge=256)
+    llm_max_tokens_generation: int = Field(default=4096, ge=256)
     # Verbatim OCR responses can be longer than structured extraction.
     llm_max_tokens_ocr: int = Field(default=4096, ge=256)
     # Cap on total input characters passed to the model per request, before delimiters.
@@ -80,13 +83,14 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql+asyncpg://prior_auth:prior_auth_dev@localhost:5432/prior_auth",
     )
-    # Optional: separate connection URL for privileged system paths (bootstrap
-    # seeder, webhook worker, admin bypass operations). When set, should point
-    # at a Postgres role that has BYPASSRLS (or equivalent) while the primary
-    # database_url points at a restricted runtime role. Reduces the blast
-    # radius of an API-replica compromise: an attacker who leaks the runtime
-    # DSN still can't flip app.is_admin meaningfully because its role is
-    # constrained. Falls back to database_url if unset.
+    # Separate connection URL for privileged system paths (auth-time API-key
+    # lookup, bootstrap seeder, audit writer, webhook worker, admin routes).
+    # Must point at a Postgres role with BYPASSRLS while database_url points
+    # at a restricted runtime role. Since migration 006 the RLS policies have
+    # no in-band bypass at all, so this role split IS the privilege boundary:
+    # an attacker who leaks the runtime DSN is org-scoped, full stop.
+    # Required in production on Postgres; falls back to database_url if unset
+    # (SQLite dev/tests, superuser dev DBs).
     database_admin_url: str = Field(default="")
     database_pool_size: int = Field(default=5, ge=1)
     database_max_overflow: int = Field(default=10, ge=0)
@@ -210,6 +214,17 @@ class Settings(BaseSettings):
         # RATE_LIMIT_BACKEND=redis so the window is shared across processes.
         # We don't fail closed here because the single-replica path is a real
         # supported topology — the runbook calls this out explicitly.
+
+        # RLS policies (migration 006) have no in-band admin bypass, so the
+        # privileged paths (API-key lookup, audit writer, webhook worker,
+        # bootstrap) need a role that bypasses RLS by *role attribute*.
+        # Without DATABASE_ADMIN_URL those paths run on the runtime role and
+        # would silently see zero rows — fail closed instead.
+        if self.database_url.startswith("postgresql") and not self.database_admin_url:
+            errors.append(
+                "DATABASE_ADMIN_URL must be set in production on Postgres "
+                "(a BYPASSRLS role for system paths; see docs/RUNBOOK.md §9)"
+            )
 
         if not self.require_https:
             errors.append("REQUIRE_HTTPS must be true in production")

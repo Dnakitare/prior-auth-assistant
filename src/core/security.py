@@ -23,7 +23,7 @@ from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
-from src.core.database import get_session
+from src.core.database import async_admin_session_maker, get_session
 from src.core.db_models import ApiKeyRecord, UserSessionRecord
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -78,12 +78,17 @@ async def set_rls_context(
     source: str = "request",
     scope: str = "transaction",
 ) -> None:
-    """Set Postgres RLS GUCs.
+    """Set the Postgres RLS org context.
 
-    Policies installed by migration 005 check `app.org_id` and `app.is_admin`
-    on every tenant-scoped row. This must be called once per request after
-    the authenticated principal is known, and also by any system code that
-    opens a session directly (bootstrap, workers).
+    Policies installed by migration 006 check ONLY `app.org_id` on every
+    tenant-scoped row — there is deliberately no GUC-based admin bypass,
+    because any connected role can set any GUC. Cross-tenant system paths
+    must run on the admin engine (`DATABASE_ADMIN_URL`), whose role carries
+    BYPASSRLS as a role attribute the runtime role cannot self-grant.
+
+    This must be called once per request after the authenticated principal
+    is known. `is_admin` no longer writes a GUC; it only drives the metric
+    and forensic log line below so admin-context activity stays observable.
 
     `scope`:
       - "transaction" (default, via `set_config(..., true)`): lasts until the
@@ -129,10 +134,6 @@ async def set_rls_context(
     await session.execute(
         text(f"SELECT set_config('app.org_id', :v, {scope_literal})"),
         {"v": org_id or ""},
-    )
-    await session.execute(
-        text(f"SELECT set_config('app.is_admin', :v, {scope_literal})"),
-        {"v": "true" if is_admin else "false"},
     )
 
 
@@ -285,7 +286,13 @@ async def get_current_user(
 ) -> AuthenticatedUser:
     """Authenticate via API key or JWT. Raises 401 on failure."""
     if api_key:
-        record = await _validate_api_key(db, api_key)
+        # Chicken-and-egg: api_keys is itself RLS-protected, but the org
+        # isn't known until the key resolves. The lookup therefore runs on
+        # the admin engine (BYPASSRLS role) in its own short transaction —
+        # the request session never gets (and can't get) an admin context.
+        async with async_admin_session_maker() as auth_db:
+            record = await _validate_api_key(auth_db, api_key)
+            await auth_db.commit()  # persist the last_used_at debounce write
         if record is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

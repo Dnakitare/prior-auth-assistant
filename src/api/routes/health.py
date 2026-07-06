@@ -68,8 +68,21 @@ async def check_database() -> ComponentHealth:
 
 
 async def check_redis() -> ComponentHealth:
-    """Check Redis connectivity."""
+    """Check Redis connectivity.
+
+    Only meaningful when the deployment actually uses Redis. With the
+    in-memory rate-limit backend there is nothing to probe — reporting
+    "degraded" for an intentionally absent component made every healthy
+    single-replica deployment look broken.
+    """
     import time
+
+    if settings.rate_limit_backend != "redis":
+        return ComponentHealth(
+            name="redis",
+            status=HealthStatus.HEALTHY,
+            message="Not in use (in-memory rate limiting)",
+        )
 
     try:
         import redis.asyncio as redis

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { getByokKey, setByokKey } from '../api';
 
 interface BYOKSettingsProps {
@@ -7,17 +7,11 @@ interface BYOKSettingsProps {
 
 export function BYOKSettings({ onChange }: BYOKSettingsProps) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState('');
-  const [active, setActive] = useState<boolean>(false);
-
-  // Hydrate from sessionStorage on mount.
-  useEffect(() => {
-    const existing = getByokKey();
-    if (existing) {
-      setDraft(existing);
-      setActive(true);
-    }
-  }, []);
+  // Hydrate from sessionStorage via lazy initializers — setState inside an
+  // effect double-renders and trips react-hooks/set-state-in-effect.
+  const [draft, setDraft] = useState(() => getByokKey() ?? '');
+  const [active, setActive] = useState<boolean>(() => Boolean(getByokKey()));
+  const [invalid, setInvalid] = useState(false);
 
   const handleSave = () => {
     const trimmed = draft.trim();
@@ -29,7 +23,8 @@ export function BYOKSettings({ onChange }: BYOKSettingsProps) {
       return;
     }
     if (!trimmed.startsWith('sk-ant-')) {
-      // No alert spam — just refuse silently with input border.
+      // Refuse with visible feedback (a red border + hint), no alert spam.
+      setInvalid(true);
       return;
     }
     setByokKey(trimmed);
@@ -78,11 +73,24 @@ export function BYOKSettings({ onChange }: BYOKSettingsProps) {
             type="password"
             placeholder="sk-ant-…"
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setInvalid(false);
+            }}
+            className={`w-full px-3 py-2 border rounded-md text-sm font-mono focus:ring-2 focus:border-transparent outline-none ${
+              invalid
+                ? 'border-red-400 focus:ring-red-500'
+                : 'border-gray-300 focus:ring-blue-500'
+            }`}
             autoComplete="off"
             spellCheck={false}
+            aria-invalid={invalid}
           />
+          {invalid && (
+            <p className="text-xs text-red-600 mt-1">
+              That doesn't look like an Anthropic key (expected sk-ant-…).
+            </p>
+          )}
           <div className="flex items-center justify-between mt-3 gap-2">
             {active ? (
               <button

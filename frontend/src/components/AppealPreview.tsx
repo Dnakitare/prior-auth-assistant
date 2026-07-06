@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { AppealResponse, DENIAL_REASON_LABELS, DenialReasonType } from '../types';
 
 interface AppealPreviewProps {
@@ -6,9 +7,18 @@ interface AppealPreviewProps {
 }
 
 export function AppealPreview({ appeal, onReset }: AppealPreviewProps) {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(appeal.appeal_letter);
-    alert('Appeal letter copied to clipboard!');
+    try {
+      await navigator.clipboard.writeText(appeal.appeal_letter);
+      setCopyState('copied');
+    } catch {
+      // Clipboard permission denied or unavailable — tell the user instead
+      // of an unhandled rejection.
+      setCopyState('failed');
+    }
+    setTimeout(() => setCopyState('idle'), 2000);
   };
 
   const handleDownload = () => {
@@ -82,7 +92,14 @@ export function AppealPreview({ appeal, onReset }: AppealPreviewProps) {
         <div className="mt-4 pt-4 border-t border-gray-200">
           <div className="flex items-center gap-2">
             <span className="text-gray-500 text-sm">Extraction Confidence:</span>
-            <div className="flex-1 bg-gray-200 rounded-full h-2 max-w-xs">
+            <div
+              className="flex-1 bg-gray-200 rounded-full h-2 max-w-xs"
+              role="progressbar"
+              aria-label="Extraction confidence"
+              aria-valuenow={Math.round(appeal.confidence_score * 100)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
               <div
                 className={`h-2 rounded-full ${
                   appeal.confidence_score >= 0.7
@@ -107,7 +124,11 @@ export function AppealPreview({ appeal, onReset }: AppealPreviewProps) {
           <h3 className="font-semibold text-gray-900">Generated Appeal Letter</h3>
           <div className="flex gap-2">
             <button onClick={handleCopy} className="btn-secondary text-sm">
-              Copy to Clipboard
+              {copyState === 'copied'
+                ? 'Copied!'
+                : copyState === 'failed'
+                ? 'Copy blocked — select the text'
+                : 'Copy to Clipboard'}
             </button>
             <button onClick={handleDownload} className="btn-primary text-sm">
               Download

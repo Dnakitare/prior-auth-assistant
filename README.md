@@ -1,10 +1,18 @@
 # Prior Authorization Assistant
 
-A reference architecture for a multi-tenant healthcare AI app, demonstrating
-defense-in-depth security around an LLM pipeline. The product surface is a
-prior-authorization appeals tool: a clinician uploads a denial letter,
-Claude extracts the denial reason and codes, then drafts an appeal letter
-tailored to the denial type.
+Turn an insurance denial letter into a ready-to-edit appeal letter. Upload
+the denial (or paste its text) and the app reads it, works out why the claim
+was denied, and drafts a professional appeal matched to that denial reason.
+
+**[Try the live demo](https://prior-auth-assistant.pages.dev)**: it ships
+with synthetic sample letters, nothing to install, no signup.
+
+![Prior Authorization Assistant generating an appeal](docs/screenshot.png)
+
+Under the hood, this repo is a reference architecture for a multi-tenant
+healthcare AI app, demonstrating defense-in-depth security around an LLM
+pipeline: a clinician uploads a denial letter, Claude extracts the denial
+reason and codes, then drafts an appeal letter tailored to the denial type.
 
 > **This repo is a portfolio piece.** The live deployment runs against
 > synthetic data only; do **not** submit real PHI. Production launch would
@@ -25,9 +33,13 @@ around it.
   the database. A query that forgets the `WHERE org_id = …` clause still
   cannot leak rows from another tenant.
 - **Two-role Postgres deployment** — runtime DSN connects as a non-`BYPASSRLS`
-  role; a separate `DATABASE_ADMIN_URL` serves bootstrap and webhook workers.
-  Leaking the runtime DSN gets an attacker a role that physically cannot see
-  other tenants.
+  role; a separate `DATABASE_ADMIN_URL` (required in production) serves the
+  privileged paths: auth-time key lookup, audit writer, webhook worker, admin
+  routes. The policies contain **no in-band bypass** — there is deliberately
+  no GUC or session flag that unlocks cross-tenant access, because any
+  connected role can set any GUC. Bypass is a Postgres *role attribute*
+  (`BYPASSRLS`) the runtime role cannot grant itself, so leaking the runtime
+  DSN gets an attacker a role that physically cannot see other tenants.
 - **Field-level PHI encryption at rest** — Fernet/MultiFernet `EncryptedText`
   columns wrap patient identifiers, claim numbers, denial text, and generated
   appeals. Key rotation is a write-time operation: prepend a new key, run
@@ -63,16 +75,18 @@ they can coexist cleanly in one async FastAPI codebase.
 
 ## Try the demo
 
-A live deployment is wired up against the synthetic samples in
-`frontend/src/data/sampleDenials.ts`. Every visitor shares a public demo
-API key (also visible in `scripts/seed_demo.py`) — that key is intentionally
-public; the demo tenant has no real data behind it.
+The live deployment runs at
+**[prior-auth-assistant.pages.dev](https://prior-auth-assistant.pages.dev)**
+(frontend on Cloudflare Pages, API on Railway) against the synthetic samples
+in `frontend/src/data/sampleDenials.ts`. Every visitor shares a public demo
+API key (baked into the frontend, also visible in `scripts/seed_demo.py`) —
+that key is intentionally public; the demo tenant has no real data behind it.
 
 ```bash
-curl -X POST $API_URL/api/v1/appeals/text \
+curl -X POST https://prior-auth-assistant-production.up.railway.app/api/v1/appeals/text \
   -H "X-API-Key: pa_demo_publickey_safe_to_share_DEADBEEF" \
   -H "Content-Type: application/json" \
-  -d '{"denial_text":"<paste denial letter here>"}'
+  -d '{"denial_text":"<paste denial letter here, minimum 50 characters>"}'
 ```
 
 The frontend has a "Try a sample" picker in **Paste Text** mode that loads
@@ -110,8 +124,10 @@ for why it would be removed in a real healthcare deployment.
 Appeal generation pipeline:
 
 1. Client `POST` to `/api/v1/appeals/{upload,text}` with API key or JWT.
-2. Middleware: body-size cap → HTTPS enforcement → CSP/HSTS → rate limit →
-   request-id binding.
+2. Middleware: CORS → security headers (CSP/HSTS, applied to every response
+   including rate-limit and body-cap rejections) → request-id binding →
+   HTTPS enforcement → rate limit → body-size cap (rejects before Pydantic
+   buffers the body).
 3. Handler: magic-byte validation (upload), Pydantic validation (text),
    then **Claude OCR** (PDF/image → text) → **Claude extraction**
    (post-validated against source) → template fill → **Claude enhancement**
@@ -162,8 +178,9 @@ missing or weak:
 
 | Variable | Required in prod | Notes |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | ✓ | Drives OCR, extraction, and generation |
-| `DATABASE_URL` | ✓ | `postgresql+asyncpg://…` |
+| `ANTHROPIC_API_KEY` | ✓ | Drives OCR, extraction, and generation (default model: `claude-sonnet-5`, override via `LLM_MODEL`) |
+| `DATABASE_URL` | ✓ | `postgresql+asyncpg://…` (restricted runtime role, no `BYPASSRLS`) |
+| `DATABASE_ADMIN_URL` | ✓ (on Postgres) | `BYPASSRLS` role for privileged paths; startup verifies the role posture |
 | `JWT_SECRET_KEY` | ✓ | ≥32 chars; must be set explicitly |
 | `AUDIT_HMAC_KEY` | ✓ | ≥32 chars; must differ from JWT key |
 | `PHI_ENCRYPTION_KEYS` | ✓ | Comma-separated Fernet keys. First is used for writes; all are tried for reads (rotation) |
@@ -194,7 +211,7 @@ See `.env.example` for the full list.
 | `POST /api/v1/appeals/upload` | API key / JWT | Multipart file (PDF/PNG/JPEG); validated by magic bytes. Accepts `Idempotency-Key` |
 | `POST /api/v1/appeals/text` | API key / JWT | JSON with `denial_text`. Accepts `Idempotency-Key` |
 | `GET /api/v1/appeals/{id}` | API key / JWT | Tenant-scoped; cross-tenant returns 404 (and audits) |
-| `PATCH /api/v1/appeals/{id}/status` | API key / JWT | `generated → submitted → approved/denied/withdrawn`; emits webhook |
+| `PATCH /api/v1/appeals/{id}/status` | API key / JWT | Set to one of `generated/submitted/approved/denied/withdrawn` (same-status is an idempotent no-op); emits webhook |
 
 ### Admin (scope: `admin`)
 
@@ -206,6 +223,13 @@ See `.env.example` for the full list.
 | `POST /api/v1/admin/webhooks` | Register a webhook endpoint. Secret returned **once** |
 | `GET /api/v1/admin/webhooks` | List webhook endpoints |
 | `DELETE /api/v1/admin/webhooks/{id}` | Soft-delete |
+
+### Payers (unauthenticated reference data)
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/v1/payers` | List known payers (static reference data, no PHI) |
+| `GET /api/v1/payers/{payer_name}/requirements` | Appeal requirements for a payer |
 
 ### Operational
 
@@ -224,13 +248,20 @@ See `.env.example` for the full list.
 
 - API keys stored as SHA-256 hashes in `api_keys`; comparison via
   `hmac.compare_digest`.
-- **Postgres RLS** (migration 005): FORCE ROW LEVEL SECURITY on every
-  tenant-scoped table. Policies check `app.org_id` and `app.is_admin`
-  GUCs set per-request via `set_config()`.
+- **Postgres RLS** (migrations 005 + 006): FORCE ROW LEVEL SECURITY on every
+  tenant-scoped table. Policies check only the `app.org_id` GUC set
+  per-request via `set_config()`. Migration 006 removed the earlier
+  `app.is_admin` escape hatch: GUCs are settable by any connected role, so a
+  GUC-based bypass would have let a leaked runtime DSN read every tenant.
 - **Two-role deployment**: runtime role has no `BYPASSRLS`; a separate
-  system role on `DATABASE_ADMIN_URL` serves privileged paths. Every
+  system role on `DATABASE_ADMIN_URL` (required in production on Postgres;
+  startup refuses to boot if the role can't bypass RLS) serves the
+  privileged paths, including the auth-time API-key lookup — the org isn't
+  known until the key resolves, so that read can't be tenant-scoped. Every
   admin-context activation increments `rls_admin_bypass_total{source}` and
-  emits a structlog line for SIEM correlation.
+  emits a structlog line for SIEM correlation. A dedicated regression test
+  proves `SET app.is_admin='true'` from the runtime role no longer widens
+  visibility.
 - JWTs reference a `user_sessions` row (`jti` claim = row id). Revoking the
   row instantly invalidates the token.
 - Scopes: `appeals:read`, `appeals:write`, `admin`.
@@ -277,12 +308,15 @@ application RCE, ship the same events to an append-only external sink
 ### Testing
 
 ```bash
-pytest             # 99 tests; SQLite by default
+pytest             # 100 tests; SQLite by default (Postgres-only tests skip)
 pytest --cov=src   # with coverage
 ```
 
-CI runs the same suite against Postgres (`tests/test_rls.py` exercises RLS
-with a non-superuser role).
+CI also runs the suite against Postgres with the real two-role topology: a
+restricted runtime role that FORCE RLS actually binds, plus a separate
+`BYPASSRLS` admin role, mirroring production. `tests/test_rls.py` includes
+an adversarial test that sets the old `app.is_admin` GUC from the runtime
+role and asserts it no longer bypasses anything.
 
 ### Project layout
 
@@ -298,7 +332,7 @@ prior-auth-assistant/
 │   │       ├── health.py             # /health, /health/live, /health/ready
 │   │       └── payers.py
 │   ├── core/
-│   │   ├── audit.py                  # HMAC chain with retry-on-conflict
+│   │   ├── audit.py                  # HMAC chain, advisory-lock serialised
 │   │   ├── audit_sink.py             # optional CloudWatch sink
 │   │   ├── config.py                 # Pydantic settings; fail-closed in prod
 │   │   ├── database.py               # asyncpg + statement_timeout

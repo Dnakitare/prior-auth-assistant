@@ -213,5 +213,5 @@ handling sensitive data, I'd rather you read the code than read the
 post. Code:
 [github.com/Dnakitare/prior-auth-assistant](https://github.com/Dnakitare/prior-auth-assistant).
 Demo:
-[link]({{your_pages_url}}).
+[link](https://prior-auth-assistant.pages.dev).
 Find me at [haraka@protonmail.com](mailto:haraka@protonmail.com).

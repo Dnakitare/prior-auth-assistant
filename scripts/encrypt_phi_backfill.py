@@ -51,12 +51,16 @@ async def _backfill(batch_size: int, dry_run: bool) -> tuple[int, int]:
     rows_updated = 0
 
     async with async_session_maker() as db:
-        offset = 0
+        # The SELECT's `diagnosis_codes_encrypted IS NULL` filter advances the
+        # scan as rows are encrypted, so the offset stays 0. Guard against a
+        # batch that makes no progress (e.g. rows whose legacy value maps to
+        # None and is skipped below) — without it those rows re-select forever.
         while True:
             result = await db.execute(_SELECT_SQL, {"limit": batch_size, "offset": 0})
             batch = list(result.mappings().all())
             if not batch:
                 break
+            updated_before_batch = rows_updated
 
             for row in batch:
                 rows_seen += 1
@@ -87,6 +91,13 @@ async def _backfill(batch_size: int, dry_run: bool) -> tuple[int, int]:
             # We keep offset=0 because each commit moves the filter forward.
             # If dry-run, break to avoid an infinite loop.
             if dry_run:
+                break
+            if rows_updated == updated_before_batch:
+                logger.warning(
+                    "backfill_stalled",
+                    detail="batch produced no updates; remaining rows are unmigratable",
+                    remaining=len(batch),
+                )
                 break
 
     return rows_seen, rows_updated

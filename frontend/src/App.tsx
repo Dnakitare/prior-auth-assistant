@@ -75,6 +75,15 @@ function App() {
     setPatientContext(context);
   }, []);
 
+  const handleModeSwitch = useCallback((mode: InputMode) => {
+    setInputMode(mode);
+    // Each mode mounts its own (empty) PatientContextForm, but the held
+    // context state would otherwise still be submitted — the user would see
+    // blank fields while stale values ride along invisibly.
+    setPatientContext(null);
+    setError(null);
+  }, []);
+
   const handleGenerateFromFile = async () => {
     if (!selectedFile) return;
 
@@ -184,7 +193,7 @@ function App() {
         <div className="flex justify-center mb-6">
           <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1">
             <button
-              onClick={() => setInputMode('upload')}
+              onClick={() => handleModeSwitch('upload')}
               className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                 inputMode === 'upload'
                   ? 'bg-blue-600 text-white'
@@ -195,7 +204,7 @@ function App() {
               Upload Document
             </button>
             <button
-              onClick={() => setInputMode('text')}
+              onClick={() => handleModeSwitch('text')}
               className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                 inputMode === 'text'
                   ? 'bg-blue-600 text-white'

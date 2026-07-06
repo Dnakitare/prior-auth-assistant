@@ -1,7 +1,21 @@
 import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import { AppealResponse, TextAppealRequest } from './types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Fail loudly if a production build is missing the API origin: the silent
+// fallback used to bake `http://localhost:8000` into deployed bundles, which
+// would send requests (including BYOK keys) to whatever runs on the
+// *visitor's* machine.
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ??
+  (import.meta.env.DEV ? 'http://localhost:8000' : undefined);
+if (!API_BASE_URL) {
+  throw new Error('VITE_API_URL must be set for production builds');
+}
+
+// The shared demo key is intentionally public (see README "Try the demo");
+// the demo tenant contains only synthetic data. Baking it in is what lets a
+// visitor click "Generate" without any setup. setApiKey() overrides it.
+const DEMO_API_KEY = 'pa_demo_publickey_safe_to_share_DEADBEEF';
 
 // API error types for better error handling
 export class ApiError extends Error {
@@ -48,7 +62,7 @@ export class ValidationError extends ApiError {
 
 // Auth token storage
 let authToken: string | null = null;
-let apiKey: string | null = null;
+let apiKey: string | null = import.meta.env.VITE_API_KEY ?? DEMO_API_KEY;
 
 export function setAuthToken(token: string | null): void {
   authToken = token;
@@ -87,10 +101,32 @@ export function setByokKey(key: string | null): void {
   }
 }
 
+// FastAPI validation errors (422) arrive as an array of these.
+interface FastApiValidationItem {
+  loc?: Array<string | number>;
+  msg?: string;
+}
+
+function flattenDetail(
+  detail: string | FastApiValidationItem[] | undefined
+): string | undefined {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        const field = item.loc?.slice(1).join('.'); // drop "body"
+        return field ? `${field}: ${item.msg}` : item.msg ?? '';
+      })
+      .filter(Boolean)
+      .join('; ');
+  }
+  return undefined;
+}
+
 // Create axios instance
 const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 60000, // 60 second timeout for LLM operations
+  timeout: 120000, // LLM pipeline (OCR + extract + generate) can exceed 60s
   headers: {
     'Content-Type': 'application/json',
   },
@@ -109,9 +145,11 @@ api.interceptors.request.use(
       config.headers['Authorization'] = `Bearer ${authToken}`;
     }
 
-    // BYOK: forward the visitor's own Anthropic key when set.
+    // BYOK: forward the visitor's own Anthropic key when set — but only on
+    // the endpoints that spend LLM tokens. Health checks and other calls
+    // don't need it, so don't widen the key's exposure surface.
     const byok = getByokKey();
-    if (byok) {
+    if (byok && config.url?.startsWith('/api/v1/appeals')) {
       config.headers['X-User-Anthropic-Key'] = byok;
     }
 
@@ -126,9 +164,16 @@ api.interceptors.request.use(
 // Response interceptor - handle errors
 api.interceptors.response.use(
   (response) => response,
-  (error: AxiosError<{ detail?: string; error_code?: string }>) => {
+  (error: AxiosError<{ detail?: string | FastApiValidationItem[]; error_code?: string }>) => {
     if (!error.response) {
-      // Network error
+      if (error.code === 'ECONNABORTED') {
+        // Axios timeout, not a connectivity problem — generation is slow.
+        throw new ApiError(
+          'The request timed out. Appeal generation can take a minute or two; please try again.',
+          0,
+          'TIMEOUT'
+        );
+      }
       throw new ApiError(
         'Network error. Please check your connection.',
         0,
@@ -137,16 +182,19 @@ api.interceptors.response.use(
     }
 
     const { status, data, headers } = error.response;
-    const message = data?.detail || error.message || 'An error occurred';
+    // FastAPI 422s put an *array* of error objects in `detail`; rendering
+    // that as a React child crashes the app, so flatten it to a string.
+    const message = flattenDetail(data?.detail) || error.message || 'An error occurred';
 
     switch (status) {
       case 401:
         throw new AuthenticationError(message);
-      case 429:
+      case 429: {
         const retryAfter = headers['retry-after']
           ? parseInt(headers['retry-after'], 10)
           : undefined;
         throw new RateLimitError(message, retryAfter);
+      }
       case 400:
       case 422:
         throw new ValidationError(message);

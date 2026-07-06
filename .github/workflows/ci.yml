@@ -61,23 +61,34 @@ jobs:
           pip install -r requirements.txt
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends postgresql-client >/dev/null
-      - name: Provision non-superuser role + test DB
-        # Mirrors the production two-role deployment described in
-        # docs/RUNBOOK.md §9: a non-super role owns its database, so
-        # FORCE RLS actually applies when this role runs queries.
+      - name: Provision two-role topology (runtime + BYPASSRLS admin)
+        # Mirrors the production deployment described in docs/RUNBOOK.md §9:
+        # the non-super runtime role owns its database (so FORCE RLS applies
+        # to its queries), and system paths run as a separate BYPASSRLS role.
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres <<'SQL'
           CREATE ROLE prior_auth LOGIN PASSWORD 'prior_auth_ci' NOSUPERUSER CREATEDB;
           CREATE DATABASE prior_auth_ci OWNER prior_auth;
+          -- Two-role topology (docs/RUNBOOK.md §9): system paths run as a
+          -- dedicated BYPASSRLS role. Since migration 006 the policies have
+          -- no GUC escape hatch, so this role is the ONLY way past RLS.
+          CREATE ROLE prior_auth_admin LOGIN PASSWORD 'prior_auth_admin_ci' NOSUPERUSER BYPASSRLS;
+          GRANT ALL PRIVILEGES ON DATABASE prior_auth_ci TO prior_auth_admin;
           SQL
-          # Confirm the demotion took effect.
-          PGPASSWORD=prior_auth_ci psql -h localhost -U prior_auth -d prior_auth_ci \
-            -c "SELECT rolname, rolsuper FROM pg_roles WHERE rolname='prior_auth';"
+          # The admin role needs privileges on tables migrations will create;
+          # simplest portable grant: membership in the owner role. BYPASSRLS
+          # is its own attribute and does NOT flow through membership, so
+          # prior_auth stays RLS-bound.
+          psql -h localhost -U postgres -d postgres -c 'GRANT prior_auth TO prior_auth_admin;'
+          # Confirm both role postures.
+          psql -h localhost -U postgres -d postgres -c \
+            "SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname LIKE 'prior_auth%';"
       - name: Apply migrations
         env:
           DATABASE_URL: postgresql+asyncpg://prior_auth:prior_auth_ci@localhost:5432/prior_auth_ci
+          DATABASE_ADMIN_URL: postgresql+asyncpg://prior_auth_admin:prior_auth_admin_ci@localhost:5432/prior_auth_ci
           JWT_SECRET_KEY: ci-jwt-secret-key-thirty-two-chars-or-more-xxxxxx
           AUDIT_HMAC_KEY: ci-audit-hmac-key-thirty-two-chars-or-more-xxxxxx
           APP_ENV: development
@@ -85,6 +96,7 @@ jobs:
       - name: pytest (RLS enforcement tests run here)
         env:
           DATABASE_URL: postgresql+asyncpg://prior_auth:prior_auth_ci@localhost:5432/prior_auth_ci
+          DATABASE_ADMIN_URL: postgresql+asyncpg://prior_auth_admin:prior_auth_admin_ci@localhost:5432/prior_auth_ci
           JWT_SECRET_KEY: ci-jwt-secret-key-thirty-two-chars-or-more-xxxxxx
           AUDIT_HMAC_KEY: ci-audit-hmac-key-thirty-two-chars-or-more-xxxxxx
           APP_ENV: development

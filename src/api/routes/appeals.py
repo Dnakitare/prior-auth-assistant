@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.audit import AuditAction, audit
 from src.core.config import settings
-from src.core.database import get_session
+from src.core.database import async_session_maker, get_session
 from src.core.models import AppealLetter, DenialExtraction, DenialReason, PatientContext
 from src.core.quota import QuotaExceeded, check_and_reserve
 from src.core.repositories import AppealRepository, decode_diagnosis_codes
@@ -161,11 +161,25 @@ def _to_response(
     )
 
 
-async def _reserve_llm_budget(db: AsyncSession, org_id: str) -> None:
-    """Reserve upper-bound tokens for this appeal against the org's daily budget."""
+async def _reserve_llm_budget(org_id: str) -> None:
+    """Reserve upper-bound tokens for this appeal against the org's daily budget.
+
+    Runs in its OWN committed transaction, not the request session: the
+    reservation takes a `SELECT … FOR UPDATE` on the org's quota row, and the
+    request session stays open across the multi-second LLM pipeline. Holding
+    the row lock that long would serialize every concurrent appeal in the org
+    on LLM latency (and trip idle_in_transaction_session_timeout). The cost
+    is that a reservation is not refunded when the LLM call later fails —
+    acceptable over-counting, same policy as the undercount case below.
+    """
     estimate = settings.llm_max_tokens_extraction + settings.llm_max_tokens_generation
     try:
-        await check_and_reserve(db, org_id=org_id, tokens=estimate)
+        async with async_session_maker() as qdb:
+            from src.core.security import set_rls_context
+
+            await set_rls_context(qdb, org_id=org_id, is_admin=False, source="quota_reserve")
+            await check_and_reserve(qdb, org_id=org_id, tokens=estimate)
+            await qdb.commit()
     except QuotaExceeded as e:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -255,7 +269,7 @@ async def generate_appeal_from_document(
     if not byok_used:
         # Only debit the platform's per-org budget when the platform key
         # is being used. BYOK requests bill the visitor's own account.
-        await _reserve_llm_budget(db, org_id)
+        await _reserve_llm_budget(org_id)
     log = log.bind(byok_used=byok_used)
     ctx["byok_used"] = byok_used
     try:
@@ -342,7 +356,7 @@ async def generate_appeal_from_text(
 
     service, byok_used = appeal_service_for_request(request)
     if not byok_used:
-        await _reserve_llm_budget(db, org_id)
+        await _reserve_llm_budget(org_id)
     log = log.bind(byok_used=byok_used)
     ctx["byok_used"] = byok_used
     try:
@@ -512,7 +526,9 @@ async def get_appeal(
     if not record:
         log.info("appeal_not_found_or_forbidden")
         # Audit the failed access so enumeration attempts leave a trail.
-        await audit.log(
+        # safe_log: an audit-write failure must not turn this 404 into a 500
+        # (every other call site here already uses the safe variant).
+        await audit.safe_log(
             db=db,
             action=AuditAction.APPEAL_READ,
             user_id=user.user_id,
@@ -648,5 +664,9 @@ async def _persist_and_audit(
             *(["diagnosis_codes"] if diagnosis_flag else []),
             *(["member_id"] if appeal.denial_extraction.member_id else []),
         ],
+        # Tag BYOK-served requests in the tamper-evident row itself (not just
+        # the log stream) so the billing/consent trail stays unambiguous.
+        # (Extra kwargs land in the row's metadata_json.)
+        byok_used=bool(ctx.get("byok_used")),
     )
     log.info("appeal_saved")

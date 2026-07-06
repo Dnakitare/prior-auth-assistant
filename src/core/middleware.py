@@ -32,40 +32,50 @@ from src.core.metrics import (
 logger = structlog.get_logger()
 
 
-def _peer_trusted(request: Request) -> bool:
-    """Return True if the immediate peer is in settings.trusted_proxies.
-
-    Accepts both bare IPs and CIDRs in trusted_proxies.
-    """
+def _ip_trusted(ip_str: str) -> bool:
+    """True if ip_str is in settings.trusted_proxies (bare IPs or CIDRs)."""
     if not settings.trusted_proxies:
         return False
-    client = request.client.host if request.client else None
-    if client is None:
-        return False
     try:
-        peer = ipaddress.ip_address(client)
+        ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
     for entry in settings.trusted_proxies:
         try:
             if "/" in entry:
-                if peer in ipaddress.ip_network(entry, strict=False):
+                if ip in ipaddress.ip_network(entry, strict=False):
                     return True
             else:
-                if peer == ipaddress.ip_address(entry):
+                if ip == ipaddress.ip_address(entry):
                     return True
         except ValueError:
             continue
     return False
 
 
+def _peer_trusted(request: Request) -> bool:
+    """Return True if the immediate peer is in settings.trusted_proxies."""
+    client = request.client.host if request.client else None
+    return client is not None and _ip_trusted(client)
+
+
 def get_client_ip(request: Request) -> str:
-    """Resolve the real client IP, honoring X-Forwarded-For only from trusted peers."""
+    """Resolve the real client IP, honoring X-Forwarded-For only from trusted peers.
+
+    Walk the header from the RIGHTMOST entry (appended by our edge proxy)
+    toward the left, skipping hops that are themselves trusted proxies; the
+    first non-trusted address is the client. Taking the leftmost entry is
+    spoofable: a client can pre-load X-Forwarded-For with any address and the
+    edge merely appends the real one, which would let an attacker rotate
+    fake IPs past the per-IP login lockout.
+    """
     if _peer_trusted(request):
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
-            # Leftmost entry is the original client.
-            return forwarded.split(",")[0].strip()
+            hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+            for hop in reversed(hops):
+                if not _ip_trusted(hop):
+                    return hop
     return request.client.host if request.client else "unknown"
 
 

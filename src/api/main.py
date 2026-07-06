@@ -111,6 +111,44 @@ async def _seed_bootstrap_api_keys() -> None:
         await db.commit()
 
 
+async def _verify_admin_role_bypasses_rls() -> None:
+    """Startup sanity check: the admin engine's role must actually bypass RLS.
+
+    Since migration 006 the policies have no in-band bypass, so if the role
+    behind DATABASE_ADMIN_URL lacks BYPASSRLS (and isn't superuser), every
+    privileged path — API-key auth, audit writes, webhook delivery — would
+    silently see zero rows. Surface that misconfiguration loudly at boot.
+    """
+    from sqlalchemy import text as _text
+
+    from src.core.database import async_admin_session_maker
+
+    async with async_admin_session_maker() as db:
+        if not db.bind or db.bind.dialect.name != "postgresql":
+            return
+        row = (
+            await db.execute(
+                _text(
+                    "SELECT rolbypassrls OR rolsuper "
+                    "FROM pg_roles WHERE rolname = current_user"
+                )
+            )
+        ).scalar()
+        if not row:
+            logger.error(
+                "admin_role_cannot_bypass_rls",
+                hint=(
+                    "The DATABASE_ADMIN_URL role needs BYPASSRLS (or superuser). "
+                    "API-key auth, audit writes, and webhook delivery will fail "
+                    "tenant-filtered until this is fixed. See docs/RUNBOOK.md §9."
+                ),
+            )
+            if settings.is_production:
+                raise RuntimeError(
+                    "DATABASE_ADMIN_URL role lacks BYPASSRLS; refusing to start"
+                )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(
@@ -158,6 +196,8 @@ async def lifespan(app: FastAPI):
     if redis_client is not None:
         from src.core.lockout import login_lockout
         login_lockout.attach_redis(redis_client)
+
+    await _verify_admin_role_bypasses_rls()
 
     await _seed_bootstrap_api_keys()
 
@@ -216,18 +256,18 @@ class _RateLimitShim(RateLimitMiddleware):
         return await super().dispatch(request, call_next)
 
 
-# Middleware order matters. `add_middleware` wraps so the LAST addition is
-# the INNERMOST (dispatched first on the request). We want:
-#   request in  →  RequestContext (bind request_id / client_ip / log timing)
+# Middleware order matters. Starlette's `add_middleware` PREPENDS, so the
+# LAST addition is the OUTERMOST (sees the request first). Dispatch order:
+#   request in  →  CORS
+#                  SecurityHeadersMiddleware — outermost of ours so CSP/HSTS
+#                    land on EVERY response, including the 429/413/400
+#                    short-circuits from the middlewares below
+#                  RequestContext (bind request_id / client_ip / log timing;
+#                    must precede anything reading request.state.client_ip)
+#                  HttpsEnforcementMiddleware
 #                  RateLimitShim
 #                  BodySizeLimitMiddleware
-#                  HttpsEnforcementMiddleware
-#                  SecurityHeadersMiddleware (adds response headers)
-#   response out
-# RequestContextMiddleware must run before anything that reads
-# `request.state.client_ip` (auth, admin audit). Keep it innermost.
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(HttpsEnforcementMiddleware)
+#   route
 app.add_middleware(
     BodySizeLimitMiddleware,
     # Global ceiling: generous multiple of the configured upload ceiling so
@@ -236,7 +276,9 @@ app.add_middleware(
     max_bytes=settings.max_upload_size_mb * 1024 * 1024 * 2,
 )
 app.add_middleware(_RateLimitShim)
+app.add_middleware(HttpsEnforcementMiddleware)
 app.add_middleware(RequestContextMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -256,6 +298,9 @@ app.add_middleware(
         "X-RateLimit-Limit",
         "X-RateLimit-Remaining",
         "X-Error-Code",
+        # Without this the browser hides Retry-After cross-origin and the
+        # frontend's "try again in N seconds" countdown can never render.
+        "Retry-After",
     ],
 )
 

@@ -18,7 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.audit import AuditAction, audit
-from src.core.database import get_session
+# Admin routes run on the admin engine (see get_admin_session): global
+# admins operate across orgs, which RLS on the runtime role forbids.
+from src.core.database import get_admin_session
 from src.core.db_models import ApiKeyRecord, WebhookEndpointRecord
 from src.core.repositories import ApiKeyRepository
 from src.core.security import (
@@ -70,7 +72,7 @@ async def create_api_key(
     request: Request,
     payload: ApiKeyCreateRequest,
     admin: Annotated[AuthenticatedUser, Depends(require_scope("admin"))],
-    db: Annotated[AsyncSession, Depends(get_session)],
+    db: Annotated[AsyncSession, Depends(get_admin_session)],
 ) -> ApiKeyCreateResponse:
     plaintext, _ = generate_api_key()
     repo = ApiKeyRepository(db)
@@ -110,7 +112,7 @@ async def create_api_key(
 )
 async def list_api_keys(
     admin: Annotated[AuthenticatedUser, Depends(require_scope("admin"))],
-    db: Annotated[AsyncSession, Depends(get_session)],
+    db: Annotated[AsyncSession, Depends(get_admin_session)],
     org_id: str | None = None,
 ) -> list[ApiKeyListItem]:
     """List keys. Admins scoped to a specific org see only their org; global
@@ -147,7 +149,7 @@ async def revoke_api_key(
     request: Request,
     key_id: str,
     admin: Annotated[AuthenticatedUser, Depends(require_scope("admin"))],
-    db: Annotated[AsyncSession, Depends(get_session)],
+    db: Annotated[AsyncSession, Depends(get_admin_session)],
 ) -> None:
     record = await db.get(ApiKeyRecord, key_id)
     if record is None:
@@ -224,7 +226,7 @@ async def create_webhook(
     request: Request,
     payload: WebhookCreateRequest,
     admin: Annotated[AuthenticatedUser, Depends(require_scope("admin"))],
-    db: Annotated[AsyncSession, Depends(get_session)],
+    db: Annotated[AsyncSession, Depends(get_admin_session)],
 ) -> WebhookCreateResponse:
     target_org = _resolve_target_org(admin, payload.org_id)
     signing_secret = secrets.token_urlsafe(32)
@@ -265,7 +267,7 @@ async def create_webhook(
 )
 async def list_webhooks(
     admin: Annotated[AuthenticatedUser, Depends(require_scope("admin"))],
-    db: Annotated[AsyncSession, Depends(get_session)],
+    db: Annotated[AsyncSession, Depends(get_admin_session)],
     org_id: str | None = None,
 ) -> list[WebhookListItem]:
     query = select(WebhookEndpointRecord).order_by(WebhookEndpointRecord.created_at.desc())
@@ -297,7 +299,7 @@ async def delete_webhook(
     request: Request,
     webhook_id: str,
     admin: Annotated[AuthenticatedUser, Depends(require_scope("admin"))],
-    db: Annotated[AsyncSession, Depends(get_session)],
+    db: Annotated[AsyncSession, Depends(get_admin_session)],
 ) -> None:
     record = await db.get(WebhookEndpointRecord, webhook_id)
     if record is None:

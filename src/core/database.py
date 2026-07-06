@@ -59,18 +59,23 @@ async_session_maker = async_sessionmaker(
 )
 
 
-# Admin engine/session: used by system paths (bootstrap seeder, webhook
-# worker, scheduled background jobs) that legitimately need cross-tenant
-# visibility. When DATABASE_ADMIN_URL is unset, we reuse the runtime engine
-# and rely on the app explicitly calling set_rls_context(is_admin=True).
-# When set, operators can deploy a distinct Postgres role with BYPASSRLS —
-# an attacker who leaks the runtime DSN still can't promote to admin.
+# Admin engine/session: used by system paths (auth-time API-key lookup,
+# bootstrap seeder, audit writer, webhook worker) that legitimately need
+# cross-tenant visibility. The role behind DATABASE_ADMIN_URL must carry
+# BYPASSRLS (or be superuser): since migration 006 the RLS policies have no
+# GUC escape hatch, so bypass is a role attribute the runtime role cannot
+# self-grant — an attacker who leaks the runtime DSN cannot promote to admin.
+# When DATABASE_ADMIN_URL is unset we fall back to the runtime engine, which
+# only works where RLS doesn't bind (SQLite dev/tests, superuser dev DBs);
+# the production validator requires it on Postgres.
 def _admin_engine_kwargs() -> dict:
     kwargs = _engine_kwargs()
     # Smaller pool — admin path is low-traffic (bootstrap + a handful of
-    # worker ticks per second). Keep connections cheap.
-    kwargs["pool_size"] = 2
-    kwargs["max_overflow"] = 4
+    # worker ticks per second). Keep connections cheap. Skip when tests
+    # forced NullPool: pool sizing args are invalid there.
+    if kwargs.get("poolclass") is None:
+        kwargs["pool_size"] = 2
+        kwargs["max_overflow"] = 4
     return kwargs
 
 
@@ -87,6 +92,26 @@ else:
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency: per-request DB session with commit-on-success / rollback-on-error."""
     async with async_session_maker() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+async def get_admin_session() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency for admin-scoped routes (require_scope("admin")).
+
+    Runs on the admin engine: global admins legitimately create/list/revoke
+    resources across orgs, which the runtime role cannot do since migration
+    006 removed the GUC bypass. Tenant scoping for org-bound admins is
+    enforced in the route handlers' explicit org filters; RLS is not the
+    control on this path — the admin scope check is.
+    """
+    async with async_admin_session_maker() as session:
         try:
             yield session
             await session.commit()

@@ -53,13 +53,31 @@ class TestRlsEnforcement:
     """
 
     @pytest.mark.asyncio
-    async def test_set_config_sets_session_gucs(self):
+    async def test_set_config_sets_org_guc_only(self):
+        """set_rls_context sets app.org_id and — since migration 006 — never
+        writes an admin GUC (the policies no longer honor one)."""
         async with async_session_maker() as db:
             await set_rls_context(db, org_id="org-A", is_admin=False)
             org = (await db.execute(text("SELECT current_setting('app.org_id', true)"))).scalar()
             admin = (await db.execute(text("SELECT current_setting('app.is_admin', true)"))).scalar()
             assert org == "org-A"
-            assert admin == "false"
+            assert admin in (None, "")  # GUC never set by the app anymore
+
+    @pytest.mark.asyncio
+    async def test_client_settable_admin_guc_does_not_bypass_rls(self):
+        """The old escape hatch: any connected role could SET app.is_admin.
+        Migration 006 removed the policy branch that honored it — flipping
+        the GUC must no longer widen visibility beyond the org context."""
+        async with async_session_maker() as db:
+            await set_rls_context(db, org_id="test-org-A", is_admin=False)
+            # Attacker move: set the GUC directly, no privilege required.
+            await db.execute(text("SELECT set_config('app.is_admin', 'true', true)"))
+            rows = (
+                await db.execute(text("SELECT org_id FROM appeals"))
+            ).scalars().all()
+            assert all(o == "test-org-A" for o in rows), (
+                "app.is_admin GUC still bypasses RLS — migration 006 not applied?"
+            )
 
     @pytest.mark.asyncio
     async def test_unfiltered_select_only_returns_current_org(self):

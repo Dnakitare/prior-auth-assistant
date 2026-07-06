@@ -49,11 +49,19 @@ echo "PHI_ENCRYPTION_KEYS=$(python -c 'from cryptography.fernet import Fernet; p
 | `RATE_LIMIT_BACKEND` | `memory` (single replica) |
 | `MIGRATE_ON_STARTUP` | `true` (single replica; flip to `false` when scaling) |
 | `CORS_ORIGINS` | placeholder; update once Cloudflare Pages URL is known |
-| `TRUSTED_PROXIES` | `0.0.0.0/0,::/0` (Railway terminates TLS at its proxy) |
+| `TRUSTED_PROXIES` | `100.64.0.0/10,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1/32` (Railway's edge connects from private/CGNAT space; do NOT use `0.0.0.0/0`, which marks every client a trusted proxy) |
 | `DATABASE_URL` | injected automatically by the Postgres plugin |
+| `DATABASE_ADMIN_URL` | required in production on Postgres. Reference `${{Postgres.DATABASE_URL}}` on Railway |
 
 The config validator auto-rewrites `postgresql://` → `postgresql+asyncpg://`,
 so the DSN Railway injects works directly.
+
+> **Labeled shortcut:** Railway's Postgres plugin hands you a single
+> superuser role, so on this demo `DATABASE_ADMIN_URL` points at the same
+> DSN as `DATABASE_URL` and RLS never actually binds (the ORM org-scoping
+> is the effective control). The real two-role topology (restricted runtime
+> role + separate `BYPASSRLS` admin role) is what CI exercises and what a
+> production deployment should provision; see `docs/RUNBOOK.md` §9.
 
 ### Generate a public domain
 
@@ -62,7 +70,8 @@ railway domain
 # or in the dashboard: Service → Settings → Networking → Generate Domain
 ```
 
-You get something like `prior-auth-api-production.up.railway.app`.
+You get something like `prior-auth-api-production.up.railway.app`
+(the live demo runs at `prior-auth-assistant-production.up.railway.app`).
 
 ### Seed the demo tenant
 
@@ -78,7 +87,7 @@ under `org_id=demo-org`. Idempotent.
 ### Smoke test
 
 ```bash
-API=https://your-railway-domain.up.railway.app
+API=https://prior-auth-assistant-production.up.railway.app  # or your own domain
 
 # 1. Health
 curl -s "$API/health/live" | jq
@@ -115,7 +124,7 @@ Environment variable for production builds:
 
 | Variable | Value |
 |---|---|
-| `VITE_API_URL` | `https://your-railway-domain.up.railway.app` |
+| `VITE_API_URL` | `https://prior-auth-assistant-production.up.railway.app` (or your own domain; production builds fail without it) |
 
 ### Trigger a deploy
 
