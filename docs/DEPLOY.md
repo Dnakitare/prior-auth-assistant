@@ -105,12 +105,32 @@ Expect a generated appeal in the response.
 
 ## 2. Frontend on Cloudflare Pages
 
-### Create the Pages project
+### How this demo actually deploys: direct upload
 
-In the Cloudflare dashboard: Workers & Pages → Create → Pages → Connect to
-Git → pick `Dnakitare/prior-auth-assistant`.
+The live project is **not Git-connected** (`wrangler pages project list`
+shows `Git Provider: No`). Nothing rebuilds on push; frontend changes ship
+by building locally and uploading:
 
-Build settings:
+```bash
+cd frontend
+VITE_API_URL=https://prior-auth-assistant-production.up.railway.app npm run build
+wrangler pages deploy dist --project-name prior-auth-assistant --branch main \
+  --commit-hash "$(git rev-parse HEAD)" --commit-message "<what changed>"
+```
+
+`--branch main` targets the production environment, so the deployment
+promotes to `prior-auth-assistant.pages.dev` immediately. `public/_headers`
+(CSP and friends) ships inside `dist/` automatically.
+
+> Forgetting this step is a silent failure mode: the API redeploys on every
+> push while the frontend quietly stays stale. If you prefer push-to-deploy,
+> connect the repo in the dashboard instead (below) — just know that today
+> it is not connected.
+
+### Alternative: Git-connected auto-builds
+
+In the Cloudflare dashboard: Workers & Pages → the project → Settings →
+Builds → connect `Dnakitare/prior-auth-assistant`. Build settings:
 
 | Setting | Value |
 |---|---|
@@ -125,12 +145,6 @@ Environment variable for production builds:
 | Variable | Value |
 |---|---|
 | `VITE_API_URL` | `https://prior-auth-assistant-production.up.railway.app` (or your own domain; production builds fail without it) |
-
-### Trigger a deploy
-
-Cloudflare Pages auto-deploys on push to the configured branch. After the
-first build completes, Pages assigns
-`prior-auth-assistant.pages.dev` (or similar).
 
 ### Update backend CORS
 
