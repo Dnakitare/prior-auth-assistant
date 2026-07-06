@@ -151,6 +151,11 @@ class LLMClient:
             message = await self.client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
+                # Explicit: Sonnet 5 runs ADAPTIVE THINKING when `thinking` is
+                # omitted, which adds latency/cost and prepends thinking blocks
+                # to `content`. This pipeline is structured extraction and
+                # template enhancement — thinking off is the right trade.
+                thinking={"type": "disabled"},
                 system=[
                     {
                         "type": "text",
@@ -160,7 +165,16 @@ class LLMClient:
                 ],
                 messages=[{"role": "user", "content": user_content}],
             )
-            return message.content[0].text
+            # Never index content[0]: models with thinking enabled prepend
+            # thinking blocks, and indexing blindly raises AttributeError.
+            text_parts = [
+                block.text
+                for block in message.content
+                if getattr(block, "type", None) == "text"
+            ]
+            if not text_parts:
+                raise LLMError("LLM returned no text content")
+            return "".join(text_parts)
         except anthropic.RateLimitError as e:
             logger.warning("LLM rate limit hit, retrying", error=str(e))
             raise

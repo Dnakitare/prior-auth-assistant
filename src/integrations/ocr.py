@@ -107,6 +107,9 @@ class ClaudeOCRProvider(OCRProvider):
             message = await self.client.messages.create(
                 model=self.model,
                 max_tokens=settings.llm_max_tokens_ocr,
+                # Verbatim transcription needs no reasoning; Sonnet 5 would
+                # otherwise run adaptive thinking by default (latency + cost).
+                thinking={"type": "disabled"},
                 messages=[
                     {
                         "role": "user",
