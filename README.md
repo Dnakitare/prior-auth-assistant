@@ -16,7 +16,7 @@ reason and codes, then drafts an appeal letter tailored to the denial type.
 
 > **This repo is a portfolio piece.** The live deployment runs against
 > synthetic data only; do **not** submit real PHI. Production launch would
-> need signed BAAs, a pen-test, and SOC 2 — none of which are in scope here.
+> need signed BAAs, a pen-test, and SOC 2, none of which are in scope here.
 > See [What this would need to ship for real](#what-this-would-need-to-ship-for-real)
 > at the bottom.
 
@@ -24,9 +24,11 @@ reason and codes, then drafts an appeal letter tailored to the denial type.
 
 ## What this demonstrates
 
-Most LLM-app code on GitHub stops at "the agent works." This repo is the
-opposite: the LLM is the easy part. The interesting work is everything
-around it.
+Most LLM-app code on GitHub stops at "the agent works." This repo is
+about everything around the model: the tenant isolation, audit trail, and
+failure paths that decide whether it can be deployed at all. It draws on
+production experience integrating EHR and claims platforms (HL7, X12) in
+healthcare SaaS, where a wrong record is a real-world problem.
 
 - **Multi-tenant isolation at two layers** — every query is scoped by `org_id`
   in the ORM, *and* Postgres row-level security enforces the same boundary at
@@ -35,7 +37,7 @@ around it.
 - **Two-role Postgres deployment** — runtime DSN connects as a non-`BYPASSRLS`
   role; a separate `DATABASE_ADMIN_URL` (required in production) serves the
   privileged paths: auth-time key lookup, audit writer, webhook worker, admin
-  routes. The policies contain **no in-band bypass** — there is deliberately
+  routes. The policies contain **no in-band bypass**: there is deliberately
   no GUC or session flag that unlocks cross-tenant access, because any
   connected role can set any GUC. Bypass is a Postgres *role attribute*
   (`BYPASSRLS`) the runtime role cannot grant itself, so leaking the runtime
@@ -79,8 +81,8 @@ The live deployment runs at
 **[prior-auth-assistant.pages.dev](https://prior-auth-assistant.pages.dev)**
 (frontend on Cloudflare Pages, API on Railway) against the synthetic samples
 in `frontend/src/data/sampleDenials.ts`. Every visitor shares a public demo
-API key (baked into the frontend, also visible in `scripts/seed_demo.py`) —
-that key is intentionally public; the demo tenant has no real data behind it.
+API key (baked into the frontend, also visible in `scripts/seed_demo.py`).
+That key is intentionally public; the demo tenant has no real data behind it.
 
 ```bash
 curl -X POST https://prior-auth-assistant-production.up.railway.app/api/v1/appeals/text \
@@ -93,7 +95,7 @@ The frontend has a "Try a sample" picker in **Paste Text** mode that loads
 one of the synthetic denials with a click.
 
 **BYOK (bring your own key).** The header has a "Use my Anthropic key"
-pill — paste an `sk-ant-…` key and the demo runs on your credits instead
+pill: paste an `sk-ant-…` key and the demo runs on your credits instead
 of the shared budget. The key is stored in `sessionStorage` only (cleared
 on tab close), never written to disk, and never logged server-side. Audit
 rows tag BYOK-served requests so the trail stays unambiguous. **This path
@@ -256,8 +258,8 @@ See `.env.example` for the full list.
 - **Two-role deployment**: runtime role has no `BYPASSRLS`; a separate
   system role on `DATABASE_ADMIN_URL` (required in production on Postgres;
   startup refuses to boot if the role can't bypass RLS) serves the
-  privileged paths, including the auth-time API-key lookup — the org isn't
-  known until the key resolves, so that read can't be tenant-scoped. Every
+  privileged paths, including the auth-time API-key lookup (the org isn't
+  known until the key resolves, so that read can't be tenant-scoped). Every
   admin-context activation increments `rls_admin_bypass_total{source}` and
   emits a structlog line for SIEM correlation. A dedicated regression test
   proves `SET app.is_admin='true'` from the runtime role no longer widens
